@@ -74,6 +74,7 @@ def main(args):
         observation_space=venv.observation_space,
         action_space=venv.action_space,
         hidsize=config["model_kwargs"]["hidsize"],
+        rnn_hidsize=config["model_kwargs"].get("rnn_hidsize", 0),
         device=device,
     )
     storage.obs[0].copy_(obs)

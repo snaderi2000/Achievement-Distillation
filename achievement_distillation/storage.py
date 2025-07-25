@@ -17,6 +17,7 @@ class RolloutStorage:
         observation_space: spaces.Box,
         action_space: spaces.Discrete,
         hidsize: int,
+        rnn_hidsize: int,
         device: th.device,
     ):
         # Params
@@ -42,6 +43,7 @@ class RolloutStorage:
         self.successes = th.zeros(nstep + 1, nproc, 22, device=device).long()
         self.timesteps = th.zeros(nstep + 1, nproc, 1, device=device).long()
         self.states = th.zeros(nstep + 1, nproc, hidsize, device=device)
+        self.rnn_states = th.zeros(nstep + 1, nproc, rnn_hidsize, device=device)
 
         # Step
         self.step = 0
@@ -50,7 +52,11 @@ class RolloutStorage:
         return getattr(self, key)
 
     def get_inputs(self, step: int):
-        inputs = {"obs": self.obs[step], "states": self.states[step]}
+        inputs = {
+            "obs": self.obs[step],
+            "states": self.states[step],
+            "rnn_states": self.rnn_states[step],
+        }
         return inputs
 
     def insert(
@@ -64,6 +70,7 @@ class RolloutStorage:
         log_probs: th.Tensor,
         successes: th.Tensor,
         model: BaseModel,
+        rnn_states: th.Tensor = None,
         **kwargs,
     ):
         # Get prev successes, timesteps, and states
@@ -91,6 +98,8 @@ class RolloutStorage:
         successes = th.where(done_conds, 0, successes)
         timesteps = th.where(done_conds, 0, timesteps)
         states = th.where(done_conds, 0, states)
+        if rnn_states is not None:
+            rnn_states = th.where(done_conds, 0, rnn_states)
 
         # Update tensors
         self.obs[self.step + 1].copy_(obs)
@@ -102,6 +111,8 @@ class RolloutStorage:
         self.successes[self.step + 1].copy_(successes)
         self.timesteps[self.step + 1].copy_(timesteps)
         self.states[self.step + 1].copy_(states)
+        if rnn_states is not None:
+            self.rnn_states[self.step + 1].copy_(rnn_states)
 
         # Update step
         self.step = (self.step + 1) % self.nstep
@@ -113,6 +124,7 @@ class RolloutStorage:
         self.successes[0].copy_(self.successes[-1])
         self.timesteps[0].copy_(self.timesteps[-1])
         self.states[0].copy_(self.states[-1])
+        self.rnn_states[0].copy_(self.rnn_states[-1])
 
         # Reset step
         self.step = 0
@@ -144,6 +156,7 @@ class RolloutStorage:
         # Sample batch
         obs = self.obs[:-1].view(-1, *self.obs.shape[2:])
         states = self.states[:-1].view(-1, *self.states.shape[2:])
+        rnn_states = self.rnn_states[:-1].view(-1, *self.rnn_states.shape[2:])
         actions = self.actions.view(-1, *self.actions.shape[2:])
         vtargs = self.returns.view(-1, *self.returns.shape[2:])
         log_probs = self.log_probs.view(-1, *self.log_probs.shape[2:])
@@ -153,6 +166,7 @@ class RolloutStorage:
             batch = {
                 "obs": obs[indices],
                 "states": states[indices],
+                "rnn_states": rnn_states[indices],
                 "actions": actions[indices],
                 "vtargs": vtargs[indices],
                 "log_probs": log_probs[indices],

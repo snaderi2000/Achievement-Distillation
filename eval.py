@@ -62,10 +62,13 @@ def main(args):
     model.eval()
     obs = venv.reset()
     states = th.zeros(1, config["model_kwargs"]["hidsize"]).to(device)
+    rnn_states = th.zeros(1, config["model_kwargs"].get("rnn_hidsize", 0)).to(device)
 
     while True:
-        outputs = model.act(obs, states=states)
+        outputs = model.act(obs, states=states, rnn_states=rnn_states)
         latents = outputs["latents"]
+        if "rnn_states" in outputs:
+            rnn_states = outputs["rnn_states"]
         actions = outputs["actions"]
         obs, rewards, dones, _ = venv.step(actions)
 

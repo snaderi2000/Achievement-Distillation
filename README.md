@@ -25,6 +25,11 @@ PPO
 python train.py --exp_name ppo --log_stats --save_ckpt
 ```
 
+PPO with GRU memory
+```
+python train.py --exp_name ppo_gru --log_stats --save_ckpt
+```
+
 PPO + Achievement Distillation (ours)
 ```
 python train.py --exp_name ppo_ad --log_stats --save_ckpt
