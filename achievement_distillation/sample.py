@@ -20,10 +20,18 @@ def sample_rollouts(
     achievements = []
     successes = []
 
+    rnn_states = None
+    if hasattr(model, "get_init_rnn_states"):
+        rnn_states = model.get_init_rnn_states(storage.nproc).to(storage.device)
+
     for step in range(storage.nstep):
         # Pass through model
         inputs = storage.get_inputs(step)
+        if rnn_states is not None:
+            inputs["rnn_states"] = rnn_states
         outputs = model.act(**inputs)
+        if rnn_states is not None:
+            rnn_states = outputs.get("rnn_states", rnn_states)
         actions = outputs["actions"]
 
         # Step environment
@@ -34,7 +42,7 @@ def sample_rollouts(
         outputs["successes"] = infos["successes"]
 
         # Update storage
-        storage.insert(**outputs, model=model)
+        storage.insert(**outputs, model=model, rnn_states=rnn_states)
 
         # Update stats
         for i, done in enumerate(dones):
@@ -57,6 +65,8 @@ def sample_rollouts(
 
     # Pass through model
     inputs = storage.get_inputs(step=-1)
+    if rnn_states is not None:
+        inputs["rnn_states"] = rnn_states
     outputs = model.act(**inputs)
     vpreds = outputs["vpreds"]
 

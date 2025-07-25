@@ -64,6 +64,7 @@ class RolloutStorage:
         log_probs: th.Tensor,
         successes: th.Tensor,
         model: BaseModel,
+        rnn_states: th.Tensor | None = None,
         **kwargs,
     ):
         # Get prev successes, timesteps, and states
@@ -79,7 +80,9 @@ class RolloutStorage:
         success_conds = success_conds.any(dim=-1, keepdim=True)
         if success_conds.any():
             with th.no_grad():
-                next_latents = model.encode(obs)
+                next_latents = model.encode(obs, rnn_states=rnn_states)
+                if isinstance(next_latents, tuple):
+                    next_latents = next_latents[0]
             states = next_latents - latents
             states = F.normalize(states, dim=-1)
             states = th.where(success_conds, states, prev_states)

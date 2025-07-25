@@ -62,10 +62,14 @@ def main(args):
     model.eval()
     obs = venv.reset()
     states = th.zeros(1, config["model_kwargs"]["hidsize"]).to(device)
+    rnn_states = None
+    if hasattr(model, "get_init_rnn_states"):
+        rnn_states = model.get_init_rnn_states(1).to(device)
 
     while True:
-        outputs = model.act(obs, states=states)
+        outputs = model.act(obs, states=states, rnn_states=rnn_states)
         latents = outputs["latents"]
+        rnn_states = outputs.get("rnn_states", rnn_states)
         actions = outputs["actions"]
         obs, rewards, dones, _ = venv.step(actions)
 
@@ -76,7 +80,7 @@ def main(args):
         # Update states
         if (rewards > 0.1).any():
             with th.no_grad():
-                next_latents = model.encode(obs)
+                next_latents, rnn_states = model.encode(obs, rnn_states=rnn_states)
             states = next_latents - latents
             states = F.normalize(states, dim=-1)
 
