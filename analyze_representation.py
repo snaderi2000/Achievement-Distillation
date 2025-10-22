@@ -102,6 +102,12 @@ def collect_data(args, config):
             episode_obs.append(obs.squeeze(0).cpu())
             next_obs, rewards, dones, infos = venv.step(actions)
 
+            # [New Debug] Print reward and achievements together at the step they occur
+            if rewards.item() > 0.1:
+                current_achievements = infos[0].get('achievements', 'N/A')
+                print(f"[Debug] Ep {i+1}, Step {step_count}: Reward={rewards.item():.2f}, Achievements={current_achievements}")
+
+
             episode_rewards.append(rewards.item())
             episode_dones.append(dones.item())
             if isinstance(infos, list) and len(infos) > 0 and 'achievements' in infos[0]:
@@ -194,7 +200,6 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
 
     # Process each episode
     for ep_idx, episode in enumerate(all_episodes):
-        print(f"\n[Debug] Processing Episode {ep_idx+1}...")
         observations = episode["observations"] # Shape (T+1, C, H, W)
         rewards = episode["rewards"]           # Shape (T,)
         achievements_over_time = episode["achievements"] # Shape (T, 22)
@@ -211,11 +216,9 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
 
         # Find where *any* achievement status changes from 0 to 1 (or just changes)
         diff = np.diff(full_achievements, axis=0) # Shape (T, 22), shows changes between steps
-        print(f"[Debug] diff.sum() for episode {ep_idx+1}: {diff.sum()}")
 
         # Filter to find *newly* unlocked achievements (where diff is +1)
         newly_unlocked_indices = np.where(diff == 1) # Tuple: (array of rows, array of cols)
-        print(f"[Debug] newly_unlocked_indices for episode {ep_idx+1}: {newly_unlocked_indices}")
         goal_steps_indices = newly_unlocked_indices[0] # Step index t (0 to T-1) where change occurred
         unlocked_achievement_indices = newly_unlocked_indices[1] # Which achievement (0-21) changed
 
@@ -223,7 +226,6 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
             actual_step_of_unlock = step_idx + 1 # Index from 1 to T
             goal_steps_dict[actual_step_of_unlock] = ach_idx
 
-        print(f"[Debug] goal_steps_dict for episode {ep_idx+1}: {goal_steps_dict}")
         sorted_goal_steps = sorted(goal_steps_dict.keys())
 
         # Label each state s_0 to s_T
@@ -238,9 +240,6 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
                     next_achievement_label = goal_steps_dict[goal_step]
                     found_next = True
                     break
-
-            if ep_idx == 0 and len(sorted_goal_steps) > 0: # Only print for first episode if it has achievements
-                print(f"[Debug] t={t}, sorted_goal_steps={sorted_goal_steps}, next_achievement_label={next_achievement_label}")
 
             labeled_data.append((observations[t], next_achievement_label))
 
