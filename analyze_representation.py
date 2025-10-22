@@ -155,6 +155,32 @@ def collect_data(args, config):
     else:
         print("Warning: No episodes were collected.")
 
+    # --- Verify Achievements ---
+    print("\n--- Verifying Achievements in Collected Data ---")
+    total_achievements_unlocked = 0
+    for i, episode in enumerate(all_episodes):
+        print(f"Episode {i+1}:")
+        episode_rewards = episode['rewards']
+        print(f"  - Total reward: {np.sum(episode_rewards):.2f}")
+        print(f"  - Number of positive reward steps: {np.sum(episode_rewards > 0)}")
+
+        if 'achievements' in episode and episode['achievements'].shape[0] > 0:
+            initial_ach = np.zeros((1, episode['achievements'].shape[1]))
+            # diff tells us when an achievement is newly unlocked
+            diff = np.diff(np.vstack([initial_ach, episode['achievements']]), axis=0)
+            num_unlocked = np.sum(diff > 0)
+            total_achievements_unlocked += num_unlocked
+            print(f"  - Achievements unlocked in this episode: {num_unlocked}")
+        else:
+            print("  - 'achievements' key not found or empty.")
+
+    if total_achievements_unlocked == 0:
+        print("\nWARNING: No achievements were unlocked in any of the collected episodes.")
+        print("The labeling process will result in all states having the default label (-1).")
+        print("Consider using a better agent or collecting more episodes.")
+    else:
+        print(f"\nSUCCESS: A total of {total_achievements_unlocked} achievements were unlocked across all episodes.")
+
     return all_episodes, model, device # Return model, not just encoder
 
 # --- Part 2: State Labeling Function ---
@@ -168,6 +194,7 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
 
     # Process each episode
     for ep_idx, episode in enumerate(all_episodes):
+        print(f"\n[Debug] Processing Episode {ep_idx+1}...")
         observations = episode["observations"] # Shape (T+1, C, H, W)
         rewards = episode["rewards"]           # Shape (T,)
         achievements_over_time = episode["achievements"] # Shape (T, 22)
@@ -184,9 +211,11 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
 
         # Find where *any* achievement status changes from 0 to 1 (or just changes)
         diff = np.diff(full_achievements, axis=0) # Shape (T, 22), shows changes between steps
+        print(f"[Debug] diff.sum() for episode {ep_idx+1}: {diff.sum()}")
 
         # Filter to find *newly* unlocked achievements (where diff is +1)
         newly_unlocked_indices = np.where(diff == 1) # Tuple: (array of rows, array of cols)
+        print(f"[Debug] newly_unlocked_indices for episode {ep_idx+1}: {newly_unlocked_indices}")
         goal_steps_indices = newly_unlocked_indices[0] # Step index t (0 to T-1) where change occurred
         unlocked_achievement_indices = newly_unlocked_indices[1] # Which achievement (0-21) changed
 
@@ -194,6 +223,7 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
             actual_step_of_unlock = step_idx + 1 # Index from 1 to T
             goal_steps_dict[actual_step_of_unlock] = ach_idx
 
+        print(f"[Debug] goal_steps_dict for episode {ep_idx+1}: {goal_steps_dict}")
         sorted_goal_steps = sorted(goal_steps_dict.keys())
 
         # Label each state s_0 to s_T
@@ -208,6 +238,9 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
                     next_achievement_label = goal_steps_dict[goal_step]
                     found_next = True
                     break
+
+            if ep_idx == 0 and len(sorted_goal_steps) > 0: # Only print for first episode if it has achievements
+                print(f"[Debug] t={t}, sorted_goal_steps={sorted_goal_steps}, next_achievement_label={next_achievement_label}")
 
             labeled_data.append((observations[t], next_achievement_label))
 
