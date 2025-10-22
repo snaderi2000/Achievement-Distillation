@@ -19,21 +19,13 @@ from achievement_distillation.model import * # Import necessary model classes
 from achievement_distillation.wrapper import VecPyTorch
 from achievement_distillation.constant import TASKS
 
-def collect_data(args):
+# --- Part 1: Data Collection Function ---
+def collect_data(args, config):
     """Loads a PPO model and collects episode data, matching eval.py setup."""
 
-    print("--- Part 1: Loading Model & Collecting Data (Corrected based on eval.py) ---")
+    print("--- Part 1: Loading Model & Collecting Data ---")
 
-    # --- 1. Setup ---
-    config_path = f"configs/{args.exp_name}.yaml" # Use exp_name to load config
-    try:
-        with open(config_path, "r") as f:
-            config = yaml.load(f, Loader=yaml.FullLoader)
-        print(f"Loaded config from: {config_path}")
-    except FileNotFoundError:
-        print(f"Error: Config file not found at {config_path}")
-        sys.exit(1)
-
+    # --- Setup ---
     random.seed(args.eval_seed)
     np.random.seed(args.eval_seed)
     th.manual_seed(args.eval_seed)
@@ -45,76 +37,53 @@ def collect_data(args):
     device = th.device("cuda:0" if cuda else "cpu")
     print(f"Using device: {device}")
 
-    # --- 2. Load Your PPO Model ---
-    # Define checkpoint path using training details
+    # --- Load Your PPO Model ---
     run_name = f"{args.exp_name}-{args.timestamp}-s{args.train_seed:02}"
     ckpt_filename = f"agent-e{args.ckpt_epoch:03}.pt"
     ckpt_path = os.path.join("./models", run_name, ckpt_filename)
 
-    # --- Create environment *before* model instantiation (like eval.py) ---
-    # Use the same seed logic as eval.py if needed, or stick to eval_seed
     venv = DummyVecEnv([lambda: Env(seed=args.eval_seed)])
-    # Add wrappers exactly as needed for the model (matching training setup if possible)
-    # VecPyTorch is crucial as it likely changes observation space
     venv = VecPyTorch(venv, device=device)
     print(f"Crafter environment created and wrapped with seed: {args.eval_seed}")
 
-    # --- Create model instance *using wrapped venv spaces* (like eval.py) ---
     try:
         model_cls = getattr(sys.modules[__name__], config["model_cls"])
-        # CRITICAL FIX: Use venv spaces, not Env() spaces
         model: BaseModel = model_cls(
             observation_space=venv.observation_space,
             action_space=venv.action_space,
             **config["model_kwargs"],
         )
         model.to(device)
-        print(f"Model class {config['model_cls']} instantiated correctly using wrapped env spaces.")
-        # Optional: Print the exact observation space used
-        # print(f"  Obs Space: {venv.observation_space}")
-    except AttributeError:
-        print(f"Error: Model class {config['model_cls']} not found. Make sure it's imported.")
-        sys.exit(1)
-    except KeyError as e:
-        print(f"Error: Missing key in config file: {e}")
-        sys.exit(1)
+        print(f"Model class {config['model_cls']} instantiated correctly.")
     except Exception as e:
         print(f"Error during model instantiation: {e}")
         sys.exit(1)
 
-
-    # --- Load the saved state dictionary (like eval.py) ---
     if not os.path.exists(ckpt_path):
         print(f"Error: Model file not found at {ckpt_path}")
         sys.exit(1)
     try:
-        # Load state_dict onto the correct device directly
         state_dict = th.load(ckpt_path, map_location=device)
         model.load_state_dict(state_dict)
         print(f"Loaded model state_dict from: {ckpt_path}")
     except Exception as e:
         print(f"Error loading state_dict: {e}")
-        # Print model structure vs state_dict keys if helpful
-        # print("Model state_dict keys:", model.state_dict().keys())
-        # print("Checkpoint state_dict keys:", state_dict.keys())
         sys.exit(1)
 
     model.eval()
     print("Model set to evaluation mode.")
 
-
-    # --- 3. Collect Dataset ---
+    # --- Collect Dataset ---
     all_episodes = []
-    # Ensure hidsize retrieval is robust
     hidsize = config.get("model_kwargs", {}).get("hidsize")
     if hidsize is None:
-         print("Warning: 'hidsize' not found in config, using default 512. Check your config.")
-         hidsize = 512 # Or determine default dynamically if possible
+         print("Warning: 'hidsize' not found in config, using default 512.")
+         hidsize = 512
 
     print(f"Starting data collection for {args.num_episodes} episodes...")
     for i in range(args.num_episodes):
         obs = venv.reset()
-        states = th.zeros(1, hidsize).to(device) # Assuming 1 env
+        states = th.zeros(1, hidsize).to(device)
 
         episode_obs = []
         episode_rewards = []
@@ -138,7 +107,7 @@ def collect_data(args):
             if isinstance(infos, list) and len(infos) > 0 and 'achievements' in infos[0]:
                  episode_achievements.append(infos[0]['achievements'].copy())
             else:
-                 print("Warning: Could not find 'achievements' in info dict.")
+                 # Ensure a placeholder of the correct shape if achievements are missing
                  episode_achievements.append(np.zeros(len(TASKS), dtype=int))
 
             obs = next_obs
@@ -149,11 +118,19 @@ def collect_data(args):
             final_obs = obs.squeeze(0).cpu()
             episode_obs.append(final_obs)
 
+            # Ensure achievements array has the correct length if episode ended early
+            # Pad if necessary, although usually it should align with rewards/dones length
+            ach_array = np.array(episode_achievements)
+            if len(ach_array) < len(episode_rewards):
+                 padding = np.zeros((len(episode_rewards) - len(ach_array), len(TASKS)), dtype=int)
+                 ach_array = np.vstack((ach_array, padding))
+
+
             all_episodes.append({
-                "observations": th.stack(episode_obs),
-                "rewards": np.array(episode_rewards),
-                "dones": np.array(episode_dones),
-                "achievements": np.array(episode_achievements)
+                "observations": th.stack(episode_obs), # Length T+1
+                "rewards": np.array(episode_rewards), # Length T
+                "dones": np.array(episode_dones),     # Length T
+                "achievements": ach_array # Length T, shape (T, 22)
             })
             print(f"Episode {i+1}/{args.num_episodes} finished. Length: {step_count} steps.")
         else:
@@ -178,26 +155,116 @@ def collect_data(args):
     else:
         print("Warning: No episodes were collected.")
 
+    return all_episodes, model, device # Return model, not just encoder
 
-    # --- Placeholder for Part 2 ---
-    print("\n--- Placeholder for Part 2: Labeling States ---")
+# --- Part 2: State Labeling Function ---
+# Mapping from achievement name string to index (0-21)
+TASK_TO_INDEX = {task: i for i, task in enumerate(TASKS)}
 
-    return all_episodes, model, device, config
+def label_states_with_next_achievement(all_episodes: list) -> list:
+    """Labels each state in the collected episodes with the next achievement index."""
+    print("\n--- Part 2: Labeling States ---")
+    labeled_data = [] # Will store tuples of (observation_tensor, next_achievement_label)
+
+    # Process each episode
+    for ep_idx, episode in enumerate(all_episodes):
+        observations = episode["observations"] # Shape (T+1, C, H, W)
+        rewards = episode["rewards"]           # Shape (T,)
+        achievements_over_time = episode["achievements"] # Shape (T, 22)
+
+        episode_len = len(rewards) # Number of steps T
+        if episode_len == 0:
+            continue
+
+        goal_steps_dict = {} # Map step_index -> achievement_index
+
+        # Pad achievements_over_time with initial state (all zeros)
+        initial_achievements = np.zeros((1, len(TASKS)), dtype=achievements_over_time.dtype)
+        full_achievements = np.vstack((initial_achievements, achievements_over_time)) # Shape (T+1, 22)
+
+        # Find where *any* achievement status changes from 0 to 1 (or just changes)
+        diff = np.diff(full_achievements, axis=0) # Shape (T, 22), shows changes between steps
+
+        # Filter to find *newly* unlocked achievements (where diff is +1)
+        newly_unlocked_indices = np.where(diff == 1) # Tuple: (array of rows, array of cols)
+        goal_steps_indices = newly_unlocked_indices[0] # Step index t (0 to T-1) where change occurred
+        unlocked_achievement_indices = newly_unlocked_indices[1] # Which achievement (0-21) changed
+
+        for step_idx, ach_idx in zip(goal_steps_indices, unlocked_achievement_indices):
+            actual_step_of_unlock = step_idx + 1 # Index from 1 to T
+            goal_steps_dict[actual_step_of_unlock] = ach_idx
+
+        sorted_goal_steps = sorted(goal_steps_dict.keys())
+
+        # Label each state s_0 to s_T
+        for t in range(episode_len + 1):
+            next_achievement_label = -1 # Default: No future achievement
+
+            found_next = False
+            for goal_step in sorted_goal_steps:
+                # Goal step is index 1 to T, representing unlock *after* step t-1
+                # We need goal_step > t (current state index 0 to T)
+                if goal_step > t:
+                    next_achievement_label = goal_steps_dict[goal_step]
+                    found_next = True
+                    break
+
+            labeled_data.append((observations[t], next_achievement_label))
+
+    print(f"--- Labeling Complete ---")
+    print(f"Total labeled states: {len(labeled_data)}")
+
+     # Verification Print
+    if labeled_data:
+        print("\nExample labeled data points (Observation Tensor, Next Achievement Label):")
+        label_counts = {}
+        for i in range(min(10, len(labeled_data))):
+             obs_tensor, label = labeled_data[i]
+             print(f"  Data point {i}: Obs shape={obs_tensor.shape}, Label={label}")
+             label_counts[label] = label_counts.get(label, 0) + 1 # Count labels in sample
+
+        print(f"\nLabel counts in full dataset:")
+        full_label_counts = {}
+        for _, label in labeled_data:
+            full_label_counts[label] = full_label_counts.get(label, 0) + 1
+        # Sort by label for readability
+        sorted_counts = dict(sorted(full_label_counts.items()))
+        print(f"  {sorted_counts}")
+
+    return labeled_data
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    # Args needed to find the model (Match eval.py structure where possible)
     parser.add_argument("--exp_name", type=str, required=True, help="Experiment name matching config")
     parser.add_argument("--timestamp", type=str, required=True, help="Timestamp of training run")
-    parser.add_argument("--train_seed", type=int, required=True, help="Seed used during training") # Changed from default=0 to required
+    parser.add_argument("--train_seed", type=int, required=True, help="Seed used during training")
     parser.add_argument("--ckpt_epoch", type=int, default=250, help="Epoch of checkpoint")
-    # Args for this data collection run
     parser.add_argument("--eval_seed", type=int, default=123, help="Seed for evaluation env")
     parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to collect")
     args = parser.parse_args()
 
-    # Run data collection
-    collected_episodes, loaded_model, device, config = collect_data(args)
+    # --- Load Config --- (Load once at the start)
+    config_path = f"configs/{args.exp_name}.yaml"
+    try:
+        with open(config_path, "r") as f:
+            config = yaml.load(f, Loader=yaml.FullLoader)
+        print(f"Loaded config from: {config_path}")
+    except FileNotFoundError:
+        print(f"Error: Config file not found at {config_path}")
+        sys.exit(1)
 
-    print("\nScript finished Part 1.")
+    # --- Run Part 1: Data Collection ---
+    collected_episodes, loaded_model, device = collect_data(args, config) # Pass config
+
+    # --- Run Part 2: Labeling States ---
+    labeled_state_data = label_states_with_next_achievement(collected_episodes)
+
+    # --- Placeholder for Part 3 ---
+    print("\n--- Placeholder for Part 3: Create Train/Test Splits ---")
+    # Part 3 will take `labeled_state_data` and split it.
+    # Part 4 will take the splits and the `loaded_model` (for its .encode method)
+    # Part 5 will train the classifier.
+    # Part 6 will evaluate the classifier.
+
+    print("\nScript finished Parts 1 & 2.")
