@@ -11,7 +11,10 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # Assuming your environment setup and imports are correct for Crafter and Stable Baselines
 from crafter.env import Env
@@ -268,29 +271,39 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
 
 
 # --- Part 3: Create Train/Test Splits ---
-def create_train_test_splits(labeled_data, test_size=0.2, random_state=42):
-    """Splits the labeled data into training and testing sets."""
+def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, random_state=42):
+    """Subsamples the labeled data into fixed-size training and testing sets."""
     print("\n--- Part 3: Creating Train/Test Splits ---")
 
     # Filter out data with label -1 (no future achievement)
     filtered_data = [item for item in labeled_data if item[1] != -1]
-    if not filtered_data:
-        print("Error: No data available for training after filtering out label -1.")
-        return None, None, None, None
-
-    observations, labels = zip(*filtered_data)
     
-    # Stack observations and convert labels to tensors
-    observations_tensor = th.stack(observations)
-    labels_tensor = th.tensor(labels, dtype=th.long)
+    if len(filtered_data) < train_size + test_size:
+        print(f"Warning: Not enough data ({len(filtered_data)}) to create a train/test split of size {train_size}/{test_size}.")
+        print("Using all available data with an 80/20 split instead.")
+        # Fallback to percentage-based split if not enough data
+        observations, labels = zip(*filtered_data)
+        observations_tensor = th.stack(observations)
+        labels_tensor = th.tensor(labels, dtype=th.long)
+        X_train, X_test, y_train, y_test = train_test_split(
+            observations_tensor, labels_tensor,
+            test_size=0.2, random_state=random_state, stratify=labels_tensor
+        )
+    else:
+        # Subsample the data as per the paper's methodology
+        random.seed(random_state)
+        random.shuffle(filtered_data)
+        
+        train_samples = filtered_data[:train_size]
+        test_samples = filtered_data[train_size : train_size + test_size]
+        
+        X_train_list, y_train_list = zip(*train_samples)
+        X_test_list, y_test_list = zip(*test_samples)
 
-    # Perform a stratified split
-    X_train, X_test, y_train, y_test = train_test_split(
-        observations_tensor, labels_tensor,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=labels_tensor # Ensure proportional splits
-    )
+        X_train = th.stack(X_train_list)
+        y_train = th.tensor(y_train_list, dtype=th.long)
+        X_test = th.stack(X_test_list)
+        y_test = th.tensor(y_test_list, dtype=th.long)
 
     print(f"Data split into training and testing sets:")
     print(f"  - Training set size: {len(X_train)}")
@@ -329,7 +342,7 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
     test_loader = DataLoader(test_dataset, batch_size=256)
     
     # --- Training Loop ---
-    num_epochs = 25
+    num_epochs = 500 # Changed from 25 to 500 to match paper
     print(f"Training classifier for {num_epochs} epochs...")
     for epoch in range(num_epochs):
         classifier.train()
@@ -346,24 +359,64 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
             total_loss += loss.item()
         
         avg_loss = total_loss / len(train_loader)
-        if (epoch + 1) % 5 == 0:
+        if (epoch + 1) % 50 == 0: # Log every 50 epochs
             print(f"Epoch [{epoch+1}/{num_epochs}], Average Loss: {avg_loss:.4f}")
 
     # --- Evaluation ---
     classifier.eval()
-    correct = 0
-    total = 0
+    all_preds = []
+    all_labels = []
+    all_confidences = []
     with th.no_grad():
         for latents_batch, labels_batch in test_loader:
             latents_batch, labels_batch = latents_batch.to(device), labels_batch.to(device)
             outputs = classifier(latents_batch)
-            _, predicted = th.max(outputs.data, 1)
-            total += labels_batch.size(0)
-            correct += (predicted == labels_batch).sum().item()
             
-    accuracy = 100 * correct / total
+            # Calculate confidence (softmax probability of the ground-truth class)
+            probs = F.softmax(outputs, dim=1)
+            gt_confidences = probs[range(len(labels_batch)), labels_batch].cpu().numpy()
+            all_confidences.extend(gt_confidences)
+
+            _, predicted = th.max(outputs.data, 1)
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels_batch.cpu().numpy())
+            
+    accuracy = 100 * np.sum(np.array(all_preds) == np.array(all_labels)) / len(all_labels)
+    median_confidence = np.median(all_confidences)
+    
     print(f"\n--- Evaluation Complete ---")
     print(f"Final Test Accuracy: {accuracy:.2f}%")
+    print(f"Median Prediction Confidence on Ground-Truth Labels: {median_confidence:.4f}")
+
+    # --- Detailed Report ---
+    print("\n--- Classification Report ---")
+    # Get the names of all unique labels present in the test set
+    unique_labels = np.unique(all_labels)
+    target_names = [TASKS[i] for i in unique_labels]
+    print(classification_report(all_labels, all_preds, target_names=target_names))
+
+    # --- Confusion Matrix ---
+    print("\n--- Confusion Matrix ---")
+    cm = confusion_matrix(all_labels, all_preds)
+    print("Columns: Predicted, Rows: Actual")
+    print(cm)
+
+    return all_confidences
+
+
+# --- Part 6: Visualize Confidence ---
+def plot_confidence_density(confidences, save_path="confidence_density.png"):
+    """Generates and saves a density plot for prediction confidences."""
+    print(f"\n--- Part 6: Generating Confidence Density Plot ---")
+    plt.figure(figsize=(8, 6))
+    sns.kdeplot(confidences, fill=True)
+    plt.xlabel("Confidence (Probability of Ground-Truth Label)")
+    plt.ylabel("Density")
+    plt.title("Prediction Confidence Distribution")
+    plt.xlim(0, 1)
+    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+    plt.savefig(save_path)
+    print(f"Density plot saved to: {save_path}")
 
 
 if __name__ == "__main__":
@@ -416,8 +469,12 @@ if __name__ == "__main__":
 
         # --- Run Part 5: Train and Evaluate Classifier ---
         num_classes = len(TASKS) # 22 achievements
-        train_and_evaluate_classifier(
+        confidences = train_and_evaluate_classifier(
             X_train_latents, y_train, X_test_latents, y_test, num_classes, device
         )
+        
+        # --- Run Part 6: Visualize Confidence ---
+        if confidences:
+            plot_confidence_density(confidences)
     
     print("\nScript finished.")
