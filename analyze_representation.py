@@ -3,30 +3,30 @@ import os
 import sys
 import random
 import yaml
-from functools import partial
+from functools import partial # Added for potential future use if needed
 
 import numpy as np
 import torch as th
+import torch.nn.functional as F
 
 # Assuming your environment setup and imports are correct for Crafter and Stable Baselines
 from crafter.env import Env
+# from crafter.recorder import VideoRecorder # Optional: remove if you don't need video
 from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
-# Note: VecMonitor might add wrappers that change info dict, adjust if needed
-# from stable_baselines3.common.vec_env.vec_monitor import VecMonitor
 
 # Imports from your project structure
-from achievement_distillation.model import * # Import necessary model classes (BaseModel, PPOBaselineModel, PPOADModel etc.)
+from achievement_distillation.model import * # Import necessary model classes
 from achievement_distillation.wrapper import VecPyTorch
 from achievement_distillation.constant import TASKS # For achievement mapping later
 
 def collect_data(args):
     """Loads a PPO model and collects episode data."""
 
-    print("--- Part 1: Loading Model & Collecting Data ---")
+    print("--- Part 1: Loading Model & Collecting Data (Based on eval.py) ---")
 
-    # --- 1. Setup (Borrow from train.py/eval.py) ---
-    # Load config file
-    config_path = f"configs/{args.config_name}.yaml"
+    # --- 1. Setup ---
+    # Load config file (using exp_name associated with the *training* run)
+    config_path = f"configs/{args.exp_name}.yaml"
     try:
         with open(config_path, "r") as f:
             config = yaml.load(f, Loader=yaml.FullLoader)
@@ -35,12 +35,12 @@ def collect_data(args):
         print(f"Error: Config file not found at {config_path}")
         sys.exit(1)
 
-    # Fix random seed
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    th.manual_seed(args.seed)
-    th.cuda.manual_seed_all(args.seed)
-    print(f"Set random seed: {args.seed}")
+    # Fix random seed for data collection
+    random.seed(args.eval_seed)
+    np.random.seed(args.eval_seed)
+    th.manual_seed(args.eval_seed)
+    th.cuda.manual_seed_all(args.eval_seed)
+    print(f"Set random seed for evaluation run: {args.eval_seed}")
 
     # CUDA setting
     th.set_num_threads(1)
@@ -48,13 +48,20 @@ def collect_data(args):
     device = th.device("cuda:0" if cuda else "cpu")
     print(f"Using device: {device}")
 
-    # --- 2. Load Your PPO Model (Borrow from eval.py) ---
+    # --- 2. Load Your PPO Model ---
+    # Define checkpoint path using training details
+    run_name = f"{args.exp_name}-{args.timestamp}-s{args.train_seed:02}"
+    # Use the specific checkpoint epoch provided, or default (like e250)
+    ckpt_filename = f"agent-e{args.ckpt_epoch:03}.pt"
+    ckpt_path = os.path.join("./models", run_name, ckpt_filename)
+
     # Create model instance
     try:
         model_cls = getattr(sys.modules[__name__], config["model_cls"])
+        # Use base Env spaces for initialization before loading state_dict
         model: BaseModel = model_cls(
-            observation_space=Env().observation_space, # Use base Env space for init
-            action_space=Env().action_space,           # Use base Env space for init
+            observation_space=Env().observation_space,
+            action_space=Env().action_space,
             **config["model_kwargs"],
         )
         model.to(device)
@@ -66,14 +73,16 @@ def collect_data(args):
         print(f"Error: Missing key in config file: {e}")
         sys.exit(1)
 
+
     # Load the saved state dictionary
-    if not os.path.exists(args.model_path):
-        print(f"Error: Model file not found at {args.model_path}")
+    if not os.path.exists(ckpt_path):
+        print(f"Error: Model file not found at {ckpt_path}")
         sys.exit(1)
     try:
-        state_dict = th.load(args.model_path, map_location=device)
+        # Load state_dict onto the correct device directly
+        state_dict = th.load(ckpt_path, map_location=device)
         model.load_state_dict(state_dict)
-        print(f"Loaded model state_dict from: {args.model_path}")
+        print(f"Loaded model state_dict from: {ckpt_path}")
     except Exception as e:
         print(f"Error loading state_dict: {e}")
         sys.exit(1)
@@ -91,82 +100,107 @@ def collect_data(args):
         print("Error: Could not find 'encoder' attribute in the model. Check model definition.")
         sys.exit(1)
 
-
     # --- 3. Collect Dataset ---
-    # Create a single Crafter environment (DummyVecEnv is simplest for one env)
-    # Use a different seed for evaluation data collection if desired
-    env_eval_seed = args.seed + 1000 # Example: offset seed
-    venv = DummyVecEnv([lambda: Env(seed=env_eval_seed)])
-    # venv = VecMonitor(venv) # Optional: if you need episode stats like VecMonitor provides
+    # Create environment
+    # Note: No VideoRecorder needed unless you want videos alongside data
+    venv = DummyVecEnv([lambda: Env(seed=args.eval_seed)])
     venv = VecPyTorch(venv, device=device)
-    print(f"Crafter environment created with seed: {env_eval_seed}")
+    print(f"Crafter environment created with seed: {args.eval_seed}")
 
     all_episodes = []
-    hidsize = config.get("model_kwargs", {}).get("hidsize", 512) # Get hidsize from config
+    hidsize = config.get("model_kwargs", {}).get("hidsize", 512) # Get hidsize
 
     print(f"Starting data collection for {args.num_episodes} episodes...")
     for i in range(args.num_episodes):
         obs = venv.reset()
-        # Reset hidden state for RNNs if your model uses them (check model's act method)
-        # Assuming model.act handles initial state if None is passed or has a reset mechanism
-        states = th.zeros(1, hidsize).to(device) # Adjust if using VecEnv with >1 env
+        # Reset hidden state for RNNs if needed
+        states = th.zeros(1, hidsize).to(device) # Assuming 1 env
 
         # Store data for the current episode
         episode_obs = []
         episode_rewards = []
         episode_dones = []
-        episode_achievements = [] # Store the full achievement vector
+        episode_achievements = []
 
         done = False
         step_count = 0
         while not done:
-            # Get action from the loaded model (no gradients needed)
+            # Get action from the loaded model
             with th.no_grad():
-                outputs = model.act(obs, states=states) # Pass states if model requires it
+                outputs = model.act(obs, states=states)
                 actions = outputs["actions"]
                 # Update hidden state if model is recurrent
                 if "next_states" in outputs:
                      states = outputs["next_states"]
+                # Store latent state *before* step if needed, or recompute later
+                # latents = outputs["latents"] # Optional: Store if needed later
 
-            # Store current observation *before* stepping
-            # Move tensor to CPU and convert to numpy for easier storage if needed,
-            # but keeping as tensors might be useful for later processing.
-            episode_obs.append(obs.squeeze(0).cpu()) # Remove batch dim, move to CPU
+
+            # --- Store data *before* stepping ---
+            episode_obs.append(obs.squeeze(0).cpu()) # Store observation
+            # --- End Store data ---
 
             # Step the environment
             next_obs, rewards, dones, infos = venv.step(actions)
 
-            # Store results for this step
-            # Assuming VecPyTorch keeps rewards/dones as tensors
-            episode_rewards.append(rewards.item()) # Get scalar value
-            episode_dones.append(dones.item())     # Get scalar value
-
-            # Extract achievements from the info dict
-            # The structure might depend on wrappers (like VecMonitor)
-            # Check what's inside infos[0] during a run
+            # --- Store results *after* stepping ---
+            episode_rewards.append(rewards.item())
+            episode_dones.append(dones.item())
             if isinstance(infos, list) and len(infos) > 0 and 'achievements' in infos[0]:
-                 episode_achievements.append(infos[0]['achievements'].copy()) # Store copy
+                 episode_achievements.append(infos[0]['achievements'].copy())
             else:
-                 # Fallback or error if achievements aren't found
-                 # You might need to adjust this based on your env setup
                  print("Warning: Could not find 'achievements' in info dict.")
-                 # Add a placeholder if needed, e.g., np.zeros(len(TASKS))
                  episode_achievements.append(np.zeros(len(TASKS), dtype=int))
+            # --- End Store results ---
 
+
+            # Update states (This part from eval.py is for *its* specific state update,
+            # which might differ from how states are handled during training/data collection.
+            # We already update `states` from model.act if it's recurrent.
+            # The original state update logic based on rewards seems specific to eval.py
+            # and might not be needed/correct for just collecting data)
+            # --- Original eval.py state update (commented out/removed) ---
+            # if (rewards > 0.1).any():
+            #     with th.no_grad():
+            #         next_latents = model.encode(obs) # obs here is actually next_obs
+            #     states = next_latents - latents
+            #     states = F.normalize(states, dim=-1)
+            # --- End Original eval.py state update ---
 
             obs = next_obs
             done = dones.item()
             step_count += 1
 
+            # Safety break for very long episodes during testing
+            # if step_count > 2000:
+            #     print("Warning: Episode exceeded 2000 steps, breaking.")
+            #     break
+
+
         # Store the collected data for this episode
-        if episode_obs: # Only store if episode had at least one step
+        # Make sure we have data before trying to stack empty lists
+        if episode_obs:
+            # Need to store the *final* observation as well for completeness
+            # The loop stores obs *before* step, so add the last `next_obs`
+            final_obs = obs.squeeze(0).cpu()
+            episode_obs.append(final_obs) # Add final observation
+
+            # Ensure all lists have consistent length if needed, depends on analysis
+            # Pad rewards, dones, achievements if necessary to match obs length + 1 ? Check requirement.
+            # Usually we need obs[0...T], actions[0...T-1], rewards[1...T], dones[1...T]
+            # Adjust storage based on exactly what Part 2 needs.
+            # For now, store obs[0...T], rewards[0...T-1], dones[0...T-1], achievements[0...T-1]
+
             all_episodes.append({
-                "observations": th.stack(episode_obs), # Stack list of tensors into one tensor
-                "rewards": np.array(episode_rewards),
-                "dones": np.array(episode_dones),
-                "achievements": np.array(episode_achievements)
+                "observations": th.stack(episode_obs), # Length T+1
+                "rewards": np.array(episode_rewards), # Length T
+                "dones": np.array(episode_dones),     # Length T
+                "achievements": np.array(episode_achievements) # Length T
             })
-        print(f"Episode {i+1}/{args.num_episodes} finished. Length: {step_count} steps.")
+            print(f"Episode {i+1}/{args.num_episodes} finished. Length: {step_count} steps.")
+        else:
+             print(f"Episode {i+1}/{args.num_episodes} finished with 0 steps.")
+
 
     venv.close()
     print(f"\n--- Data Collection Complete ---")
@@ -178,20 +212,16 @@ def collect_data(args):
         print("\nData structure for the first episode:")
         for key, value in first_ep.items():
             if isinstance(value, th.Tensor):
-                print(f"  '{key}': Tensor(shape={value.shape}, dtype={value.dtype})")
+                print(f"  '{key}': Tensor(shape={value.shape}, dtype={value.dtype}, device={value.device})")
             elif isinstance(value, np.ndarray):
                  print(f"  '{key}': numpy.ndarray(shape={value.shape}, dtype={value.dtype})")
             else:
                  print(f"  '{key}': type={type(value)}")
+        print(f"  Observations length: {len(first_ep['observations'])}")
+        print(f"  Rewards length: {len(first_ep['rewards'])}")
+        print(f"  Dones length: {len(first_ep['dones'])}")
+        print(f"  Achievements length: {len(first_ep['achievements'])}")
 
-        # Check obs tensor details (first episode, first step)
-        first_obs = first_ep["observations"][0]
-        print(f"\nExample Observation (first step of first ep):")
-        print(f"  Shape: {first_obs.shape}")
-        print(f"  Dtype: {first_obs.dtype}")
-        print(f"  Min value: {first_obs.min().item():.2f}")
-        print(f"  Max value: {first_obs.max().item():.2f}")
-        print(f"  Device: {first_obs.device}") # Should be CPU after .cpu()
 
     else:
         print("Warning: No episodes were collected.")
@@ -201,24 +231,23 @@ def collect_data(args):
     # Will go here... takes `all_episodes` as input.
     print("\n--- Placeholder for Part 2: Labeling States ---")
 
-    # For now, just return the collected data
+    # Return collected data and necessary objects for next steps
     return all_episodes, encoder, device, config
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, required=True,
-                        help="Path to the saved PPO model (.pt file)")
-    parser.add_argument("--config_name", type=str, required=True,
-                        help="Name of the config file (e.g., 'ppo_baseline') used for training the model")
-    parser.add_argument("--seed", type=int, default=0,
-                        help="Random seed for reproducibility")
-    parser.add_argument("--num_episodes", type=int, default=10,
-                        help="Number of episodes to collect for the dataset")
+    # Args needed to find the model
+    parser.add_argument("--exp_name", type=str, required=True, help="Experiment name matching the config file (e.g., ppo_baseline)")
+    parser.add_argument("--timestamp", type=str, required=True, help="Timestamp of the training run")
+    parser.add_argument("--train_seed", type=int, required=True, help="Seed used during training")
+    parser.add_argument("--ckpt_epoch", type=int, default=250, help="Epoch number of the checkpoint to load (e.g., 250)")
+    # Args for this data collection run
+    parser.add_argument("--eval_seed", type=int, default=123, help="Seed for the evaluation environment")
+    parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to collect")
     args = parser.parse_args()
 
     # Run data collection
     collected_episodes, loaded_encoder, device, config = collect_data(args)
 
-    # You can add more code here later to process `collected_episodes`
     print("\nScript finished Part 1.")
