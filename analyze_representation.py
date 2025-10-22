@@ -7,6 +7,10 @@ from functools import partial
 
 import numpy as np
 import torch as th
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+from sklearn.model_selection import train_test_split
 import torch.nn.functional as F
 
 # Assuming your environment setup and imports are correct for Crafter and Stable Baselines
@@ -101,15 +105,6 @@ def collect_data(args, config):
 
             episode_obs.append(obs.squeeze(0).cpu())
             next_obs, rewards, dones, infos = venv.step(actions)
-
-            # [New Debug] Print reward and achievements together at the step they occur
-            if rewards.item() > 0.1:
-                # Corrected access to the achievements tensor
-                current_achievements = infos.get('achievements', 'N/A')
-                if not isinstance(current_achievements, str):
-                    current_achievements = current_achievements[0].cpu().numpy() # Access first env's data
-                print(f"[Debug] Ep {i+1}, Step {step_count}: Reward={rewards.item():.2f}, Achievements={current_achievements}")
-
 
             episode_rewards.append(rewards.item())
             episode_dones.append(dones.item())
@@ -272,6 +267,105 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
     return labeled_data
 
 
+# --- Part 3: Create Train/Test Splits ---
+def create_train_test_splits(labeled_data, test_size=0.2, random_state=42):
+    """Splits the labeled data into training and testing sets."""
+    print("\n--- Part 3: Creating Train/Test Splits ---")
+
+    # Filter out data with label -1 (no future achievement)
+    filtered_data = [item for item in labeled_data if item[1] != -1]
+    if not filtered_data:
+        print("Error: No data available for training after filtering out label -1.")
+        return None, None, None, None
+
+    observations, labels = zip(*filtered_data)
+    
+    # Stack observations and convert labels to tensors
+    observations_tensor = th.stack(observations)
+    labels_tensor = th.tensor(labels, dtype=th.long)
+
+    # Perform a stratified split
+    X_train, X_test, y_train, y_test = train_test_split(
+        observations_tensor, labels_tensor,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=labels_tensor # Ensure proportional splits
+    )
+
+    print(f"Data split into training and testing sets:")
+    print(f"  - Training set size: {len(X_train)}")
+    print(f"  - Testing set size:  {len(X_test)}")
+    
+    return X_train, X_test, y_train, y_test
+
+# --- Part 4: Extract Latent Representations ---
+def extract_latent_vectors(model, data_loader, device):
+    """Extracts latent vectors from the model's encoder for a given dataset."""
+    model.eval()
+    latent_vectors = []
+    with th.no_grad():
+        for observations_batch in data_loader:
+            observations_batch = observations_batch[0].to(device)
+            latents = model.encode(observations_batch)
+            latent_vectors.append(latents.cpu())
+    
+    return th.cat(latent_vectors, dim=0)
+
+# --- Part 5: Train and Evaluate Classifier ---
+def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_test, num_classes, device):
+    """Trains and evaluates a linear classifier on the latent vectors."""
+    print("\n--- Part 5: Training and Evaluating Classifier ---")
+    
+    # --- Setup ---
+    input_dim = X_train_latents.shape[1]
+    classifier = nn.Linear(input_dim, num_classes).to(device)
+    optimizer = optim.Adam(classifier.parameters(), lr=1e-3)
+    criterion = nn.CrossEntropyLoss()
+    
+    train_dataset = TensorDataset(X_train_latents, y_train)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    
+    test_dataset = TensorDataset(X_test_latents, y_test)
+    test_loader = DataLoader(test_dataset, batch_size=256)
+    
+    # --- Training Loop ---
+    num_epochs = 25
+    print(f"Training classifier for {num_epochs} epochs...")
+    for epoch in range(num_epochs):
+        classifier.train()
+        total_loss = 0
+        for latents_batch, labels_batch in train_loader:
+            latents_batch, labels_batch = latents_batch.to(device), labels_batch.to(device)
+            
+            optimizer.zero_grad()
+            outputs = classifier(latents_batch)
+            loss = criterion(outputs, labels_batch)
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+        
+        avg_loss = total_loss / len(train_loader)
+        if (epoch + 1) % 5 == 0:
+            print(f"Epoch [{epoch+1}/{num_epochs}], Average Loss: {avg_loss:.4f}")
+
+    # --- Evaluation ---
+    classifier.eval()
+    correct = 0
+    total = 0
+    with th.no_grad():
+        for latents_batch, labels_batch in test_loader:
+            latents_batch, labels_batch = latents_batch.to(device), labels_batch.to(device)
+            outputs = classifier(latents_batch)
+            _, predicted = th.max(outputs.data, 1)
+            total += labels_batch.size(0)
+            correct += (predicted == labels_batch).sum().item()
+            
+    accuracy = 100 * correct / total
+    print(f"\n--- Evaluation Complete ---")
+    print(f"Final Test Accuracy: {accuracy:.2f}%")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp_name", type=str, required=True, help="Experiment name matching config")
@@ -298,11 +392,32 @@ if __name__ == "__main__":
     # --- Run Part 2: Labeling States ---
     labeled_state_data = label_states_with_next_achievement(collected_episodes)
 
-    # --- Placeholder for Part 3 ---
-    print("\n--- Placeholder for Part 3: Create Train/Test Splits ---")
-    # Part 3 will take `labeled_state_data` and split it.
-    # Part 4 will take the splits and the `loaded_model` (for its .encode method)
-    # Part 5 will train the classifier.
-    # Part 6 will evaluate the classifier.
+    # --- Run Part 3: Create Train/Test Splits ---
+    X_train, X_test, y_train, y_test = create_train_test_splits(labeled_state_data)
+    
+    if X_train is not None:
+        # --- Run Part 4: Extract Latent Representations ---
+        print("\n--- Part 4: Extracting Latent Representations ---")
+        # Create DataLoaders for extraction
+        train_obs_dataset = TensorDataset(X_train)
+        train_obs_loader = DataLoader(train_obs_dataset, batch_size=256)
+        
+        test_obs_dataset = TensorDataset(X_test)
+        test_obs_loader = DataLoader(test_obs_dataset, batch_size=256)
 
-    print("\nScript finished Parts 1 & 2.")
+        print("Extracting latents for training set...")
+        X_train_latents = extract_latent_vectors(loaded_model, train_obs_loader, device)
+        print("Extracting latents for testing set...")
+        X_test_latents = extract_latent_vectors(loaded_model, test_obs_loader, device)
+
+        print(f"Latent vector shapes:")
+        print(f"  - Training latents: {X_train_latents.shape}")
+        print(f"  - Testing latents:  {X_test_latents.shape}")
+
+        # --- Run Part 5: Train and Evaluate Classifier ---
+        num_classes = len(TASKS) # 22 achievements
+        train_and_evaluate_classifier(
+            X_train_latents, y_train, X_test_latents, y_test, num_classes, device
+        )
+    
+    print("\nScript finished.")
