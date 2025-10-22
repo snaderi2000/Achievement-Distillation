@@ -102,12 +102,6 @@ def collect_data(args):
     model.eval()
     print("Model set to evaluation mode.")
 
-    try:
-        encoder = model.encoder
-        print("Encoder reference obtained.")
-    except AttributeError:
-        print("Error: Could not find 'encoder' attribute. Check model definition.")
-        sys.exit(1)
 
     # --- 3. Collect Dataset ---
     all_episodes = []
@@ -188,7 +182,7 @@ def collect_data(args):
     # --- Placeholder for Part 2 ---
     print("\n--- Placeholder for Part 2: Labeling States ---")
 
-    return all_episodes, encoder, device, config
+    return all_episodes, model, device, config
 
 
 if __name__ == "__main__":
@@ -204,6 +198,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Run data collection
-    collected_episodes, loaded_encoder, device, config = collect_data(args)
+    collected_episodes, loaded_model, device, config = collect_data(args)
 
     print("\nScript finished Part 1.")
