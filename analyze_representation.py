@@ -15,6 +15,7 @@ from sklearn.metrics import classification_report, confusion_matrix
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import seaborn as sns
+from collections import Counter
 
 # Assuming your environment setup and imports are correct for Crafter and Stable Baselines
 from crafter.env import Env
@@ -278,6 +279,20 @@ def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, ra
     # Filter out data with label -1 (no future achievement)
     filtered_data = [item for item in labeled_data if item[1] != -1]
     
+    # Pre-split filtering: Remove classes with too few members for stratification
+    if filtered_data:
+        labels_for_counting = [label for _, label in filtered_data]
+        label_counts = Counter(labels_for_counting)
+        
+        # Identify labels with fewer than 2 samples (the minimum for stratification)
+        rare_labels = {label for label, count in label_counts.items() if count < 2}
+        
+        if rare_labels:
+            print(f"Warning: The following labels have only 1 sample and will be removed to allow for stratified splitting: {sorted(list(rare_labels))}")
+            original_count = len(filtered_data)
+            filtered_data = [item for item in filtered_data if item[1] not in rare_labels]
+            print(f"Removed {original_count - len(filtered_data)} samples corresponding to these rare labels.")
+
     if len(filtered_data) < train_size + test_size:
         print(f"Warning: Not enough data ({len(filtered_data)}) to create a train/test split of size {train_size}/{test_size}.")
         print("Using all available data with an 80/20 split instead.")
