@@ -104,14 +104,20 @@ def collect_data(args, config):
 
             # [New Debug] Print reward and achievements together at the step they occur
             if rewards.item() > 0.1:
-                current_achievements = infos[0].get('achievements', 'N/A')
+                # Corrected access to the achievements tensor
+                current_achievements = infos.get('achievements', 'N/A')
+                if not isinstance(current_achievements, str):
+                    current_achievements = current_achievements[0].cpu().numpy() # Access first env's data
                 print(f"[Debug] Ep {i+1}, Step {step_count}: Reward={rewards.item():.2f}, Achievements={current_achievements}")
 
 
             episode_rewards.append(rewards.item())
             episode_dones.append(dones.item())
-            if isinstance(infos, list) and len(infos) > 0 and 'achievements' in infos[0]:
-                 episode_achievements.append(infos[0]['achievements'].copy())
+            # Corrected logic for extracting achievements
+            if 'achievements' in infos:
+                 # The wrapper returns a tensor, access the data for the first (and only) env
+                 ach_tensor = infos['achievements'][0].cpu().numpy()
+                 episode_achievements.append(ach_tensor.copy())
             else:
                  # Ensure a placeholder of the correct shape if achievements are missing
                  episode_achievements.append(np.zeros(len(TASKS), dtype=int))
