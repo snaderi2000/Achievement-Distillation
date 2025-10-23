@@ -66,6 +66,7 @@ class VecPyTorch(VecEnvWrapper):
     def transform_infos(
         self, infos: Sequence[Dict[str, np.ndarray]]
     ) -> Dict[str, th.Tensor]:
+        print("DEBUG: Raw infos from venv:", infos) # Temporary debug print
         # Episode lengths and rewards
         episode_lengths = th.zeros(len(infos)).long().to(self.device)
         episode_rewards = th.zeros(len(infos)).float().to(self.device)
