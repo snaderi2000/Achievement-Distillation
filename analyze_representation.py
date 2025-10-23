@@ -28,10 +28,32 @@ from achievement_distillation.wrapper import VecPyTorch
 from achievement_distillation.constant import TASKS
 
 # --- Part 1: Data Collection Function ---
-def collect_data(args, config):
-    """Loads a PPO model and collects episode data, matching eval.py setup."""
+def collect_data(args, use_expert=False):
+    """Loads a specified model and collects episode data."""
 
-    print("--- Part 1: Loading Model & Collecting Data ---")
+    if use_expert:
+        exp_name = args.expert_exp_name
+        timestamp = args.expert_timestamp
+        train_seed = args.expert_train_seed
+        ckpt_epoch = args.expert_ckpt_epoch
+        config_path = f"configs/{exp_name}.yaml"
+        print("--- Part 1: Loading EXPERT Model & Collecting Data ---")
+    else:
+        exp_name = args.exp_name
+        timestamp = args.timestamp
+        train_seed = args.train_seed
+        ckpt_epoch = args.ckpt_epoch
+        config_path = f"configs/{exp_name}.yaml"
+        print("--- Part 1: Loading Model & Collecting Data (Self-Evaluation) ---")
+
+    # --- Load Config for the data collection model ---
+    try:
+        with open(config_path, "r") as f:
+            config = yaml.load(f, Loader=yaml.FullLoader)
+        print(f"Loaded config from: {config_path}")
+    except FileNotFoundError:
+        print(f"Error: Config file not found at {config_path}")
+        sys.exit(1)
 
     # --- Setup ---
     random.seed(args.eval_seed)
@@ -46,8 +68,8 @@ def collect_data(args, config):
     print(f"Using device: {device}")
 
     # --- Load Your PPO Model ---
-    run_name = f"{args.exp_name}-{args.timestamp}-s{args.train_seed:02}"
-    ckpt_filename = f"agent-e{args.ckpt_epoch:03}.pt"
+    run_name = f"{exp_name}-{timestamp}-s{train_seed:02}"
+    ckpt_filename = f"agent-e{ckpt_epoch:03}.pt"
     ckpt_path = os.path.join("./models", run_name, ckpt_filename)
 
     venv = DummyVecEnv([lambda: Env(seed=args.eval_seed)])
@@ -192,7 +214,7 @@ def collect_data(args, config):
     else:
         print(f"\nSUCCESS: A total of {total_achievements_unlocked} achievements were unlocked across all episodes.")
 
-    return all_episodes, model, device # Return model, not just encoder
+    return all_episodes, device
 
 # --- Part 2: State Labeling Function ---
 # Mapping from achievement name string to index (0-21)
@@ -434,18 +456,11 @@ def plot_confidence_density(confidences, save_path="confidence_density.png"):
     print(f"Density plot saved to: {save_path}")
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--exp_name", type=str, required=True, help="Experiment name matching config")
-    parser.add_argument("--timestamp", type=str, required=True, help="Timestamp of training run")
-    parser.add_argument("--train_seed", type=int, required=True, help="Seed used during training")
-    parser.add_argument("--ckpt_epoch", type=int, default=250, help="Epoch of checkpoint")
-    parser.add_argument("--eval_seed", type=int, default=123, help="Seed for evaluation env")
-    parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to collect")
-    args = parser.parse_args()
+def load_analysis_model(exp_name, timestamp, train_seed, ckpt_epoch, device):
+    """Loads the model whose representations will be analyzed."""
+    print("\n--- Loading ANALYSIS Model for Representation Extraction ---")
 
-    # --- Load Config --- (Load once at the start)
-    config_path = f"configs/{args.exp_name}.yaml"
+    config_path = f"configs/{exp_name}.yaml"
     try:
         with open(config_path, "r") as f:
             config = yaml.load(f, Loader=yaml.FullLoader)
@@ -454,8 +469,76 @@ if __name__ == "__main__":
         print(f"Error: Config file not found at {config_path}")
         sys.exit(1)
 
+    # A temporary venv is needed to get observation/action space for model instantiation
+    temp_venv = DummyVecEnv([lambda: Env()])
+    
+    try:
+        model_cls = getattr(sys.modules[__name__], config["model_cls"])
+        model: BaseModel = model_cls(
+            observation_space=temp_venv.observation_space,
+            action_space=temp_venv.action_space,
+            **config["model_kwargs"],
+        )
+        model.to(device)
+        print(f"Model class {config['model_cls']} instantiated for {exp_name}.")
+    except Exception as e:
+        print(f"Error during model instantiation for {exp_name}: {e}")
+        sys.exit(1)
+    finally:
+        temp_venv.close()
+
+    run_name = f"{exp_name}-{timestamp}-s{train_seed:02}"
+    ckpt_filename = f"agent-e{ckpt_epoch:03}.pt"
+    ckpt_path = os.path.join("./models", run_name, ckpt_filename)
+
+    if not os.path.exists(ckpt_path):
+        print(f"Error: Model file not found at {ckpt_path}")
+        sys.exit(1)
+    try:
+        state_dict = th.load(ckpt_path, map_location=device)
+        model.load_state_dict(state_dict)
+        print(f"Loaded ANALYSIS model state_dict from: {ckpt_path}")
+    except Exception as e:
+        print(f"Error loading state_dict for {exp_name}: {e}")
+        sys.exit(1)
+
+    model.eval()
+    return model
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    # Analysis model arguments (the one whose representations we test)
+    parser.add_argument("--exp_name", type=str, required=True, help="Experiment name of the model to ANALYZE.")
+    parser.add_argument("--timestamp", type=str, required=True, help="Timestamp of the model to ANALYZE.")
+    parser.add_argument("--train_seed", type=int, required=True, help="Seed of the model to ANALYZE.")
+    parser.add_argument("--ckpt_epoch", type=int, default=250, help="Epoch of the model to ANALYZE.")
+
+    # Expert model arguments (optional, for data collection)
+    parser.add_argument("--expert_exp_name", type=str, default=None, help="If provided, use this model as the expert for data collection.")
+    parser.add_argument("--expert_timestamp", type=str, default=None, help="Timestamp of the expert model.")
+    parser.add_argument("--expert_train_seed", type=int, default=None, help="Seed of the expert model.")
+    parser.add_argument("--expert_ckpt_epoch", type=int, default=250, help="Epoch of the expert model.")
+    
+    # General arguments
+    parser.add_argument("--eval_seed", type=int, default=123, help="Seed for evaluation env")
+    parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to collect")
+    args = parser.parse_args()
+
     # --- Run Part 1: Data Collection ---
-    collected_episodes, loaded_model, device = collect_data(args, config) # Pass config
+    use_expert = bool(args.expert_exp_name)
+    if use_expert:
+        # Ensure all expert args are provided if expert_exp_name is set
+        if not all([args.expert_timestamp, args.expert_train_seed is not None]):
+            print("Error: If --expert_exp_name is used, you must provide --expert_timestamp and --expert_train_seed.")
+            sys.exit(1)
+    
+    collected_episodes, device = collect_data(args, use_expert=use_expert)
+
+    # --- Load the ANALYSIS Model ---
+    analysis_model = load_analysis_model(
+        args.exp_name, args.timestamp, args.train_seed, args.ckpt_epoch, device
+    )
 
     # --- Run Part 2: Labeling States ---
     labeled_state_data = label_states_with_next_achievement(collected_episodes)
@@ -474,9 +557,9 @@ if __name__ == "__main__":
         test_obs_loader = DataLoader(test_obs_dataset, batch_size=256)
 
         print("Extracting latents for training set...")
-        X_train_latents = extract_latent_vectors(loaded_model, train_obs_loader, device)
+        X_train_latents = extract_latent_vectors(analysis_model, train_obs_loader, device)
         print("Extracting latents for testing set...")
-        X_test_latents = extract_latent_vectors(loaded_model, test_obs_loader, device)
+        X_test_latents = extract_latent_vectors(analysis_model, test_obs_loader, device)
 
         print(f"Latent vector shapes:")
         print(f"  - Training latents: {X_train_latents.shape}")
