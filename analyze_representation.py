@@ -470,7 +470,7 @@ def load_analysis_model(exp_name, timestamp, train_seed, ckpt_epoch, device):
         sys.exit(1)
 
     # A temporary venv is needed to get observation/action space for model instantiation
-    temp_venv = DummyVecEnv([lambda: Env()])
+    temp_venv = VecPyTorch(DummyVecEnv([lambda: Env()]), device=device)
     
     try:
         model_cls = getattr(sys.modules[__name__], config["model_cls"])
