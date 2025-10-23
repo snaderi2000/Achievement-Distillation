@@ -268,24 +268,43 @@ def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, ra
 
     if len(labeled_data) < train_size + test_size:
         print(f"Warning: Not enough data ({len(labeled_data)}) to create a train/test split of size {train_size}/{test_size}.")
-        print("This may be due to a lack of health-decreasing events.")
-        print("Exiting.")
-        return None, None, None, None
+        print("Using all available data with a stratified 80/20 split instead.")
+        
+        if not labeled_data:
+            print("Error: No labeled data to split.")
+            return None, None, None, None
 
-    # Subsample the data as per the specified sizes
-    random.seed(random_state)
-    random.shuffle(labeled_data)
-    
-    train_samples = labeled_data[:train_size]
-    test_samples = labeled_data[train_size : train_size + test_size]
-    
-    X_train_list, y_train_list = zip(*train_samples)
-    X_test_list, y_test_list = zip(*test_samples)
+        observations, labels = zip(*labeled_data)
+        observations_tensor = th.stack(observations)
+        labels_tensor = th.tensor(labels, dtype=th.long)
 
-    X_train = th.stack(X_train_list)
-    y_train = th.tensor(y_train_list, dtype=th.long)
-    X_test = th.stack(X_test_list)
-    y_test = th.tensor(y_test_list, dtype=th.long)
+        # Stratification requires at least 2 samples per class.
+        label_counts = Counter(labels)
+        if any(count < 2 for count in label_counts.values()):
+            print("Warning: One or more classes have fewer than 2 samples. Cannot use stratification.")
+            stratify_labels = None
+        else:
+            stratify_labels = labels_tensor
+        
+        X_train, X_test, y_train, y_test = train_test_split(
+            observations_tensor, labels_tensor,
+            test_size=0.2, random_state=random_state, stratify=stratify_labels
+        )
+    else:
+        # Subsample the data as per the specified sizes
+        random.seed(random_state)
+        random.shuffle(labeled_data)
+        
+        train_samples = labeled_data[:train_size]
+        test_samples = labeled_data[train_size : train_size + test_size]
+        
+        X_train_list, y_train_list = zip(*train_samples)
+        X_test_list, y_test_list = zip(*test_samples)
+
+        X_train = th.stack(X_train_list)
+        y_train = th.tensor(y_train_list, dtype=th.long)
+        X_test = th.stack(X_test_list)
+        y_test = th.tensor(y_test_list, dtype=th.long)
 
     print(f"Data split into training and testing sets:")
     print(f"  - Training set size: {len(X_train)}")
