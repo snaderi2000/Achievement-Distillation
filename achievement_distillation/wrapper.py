@@ -85,12 +85,18 @@ class VecPyTorch(VecEnvWrapper):
         # Successes
         successes = (achievements > 0).long()
 
+        # Health
+        health = [info["health"] for info in infos]
+        health = np.array(health)
+        health = th.from_numpy(health).float().to(self.device)
+
         # Infos
         infos = {
             "episode_lengths": episode_lengths,
             "episode_rewards": episode_rewards,
             "achievements": achievements,
             "successes": successes,
+            "health": health,
         }
 
         return infos

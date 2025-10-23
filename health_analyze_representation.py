@@ -133,9 +133,7 @@ def collect_data(args, use_expert=False):
             episode_obs.append(obs.squeeze(0).cpu())
             next_obs, rewards, dones, infos = venv.step(actions)
             
-            print("DEBUG infos:", infos)
-            
-            episode_health.append(infos['health'][0].item())
+            episode_health.append(infos['health'].item())
             episode_rewards.append(rewards.item())
             episode_dones.append(dones.item())
             # Corrected logic for extracting achievements
