@@ -66,7 +66,6 @@ class VecPyTorch(VecEnvWrapper):
     def transform_infos(
         self, infos: Sequence[Dict[str, np.ndarray]]
     ) -> Dict[str, th.Tensor]:
-        print("DEBUG: Raw infos from venv:", infos) # Temporary debug print
         # Episode lengths and rewards
         episode_lengths = th.zeros(len(infos)).long().to(self.device)
         episode_rewards = th.zeros(len(infos)).float().to(self.device)
@@ -87,7 +86,7 @@ class VecPyTorch(VecEnvWrapper):
         successes = (achievements > 0).long()
 
         # Health
-        health = [info["health"] for info in infos]
+        health = [info["inventory"]["health"] for info in infos]
         health = np.array(health)
         health = th.from_numpy(health).float().to(self.device)
 
