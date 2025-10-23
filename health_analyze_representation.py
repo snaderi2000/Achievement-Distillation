@@ -119,6 +119,7 @@ def collect_data(args, use_expert=False):
         episode_rewards = []
         episode_dones = []
         episode_achievements = []
+        episode_health = []
 
         done = False
         step_count = 0
@@ -132,6 +133,7 @@ def collect_data(args, use_expert=False):
             episode_obs.append(obs.squeeze(0).cpu())
             next_obs, rewards, dones, infos = venv.step(actions)
 
+            episode_health.append(infos['health'][0].item())
             episode_rewards.append(rewards.item())
             episode_dones.append(dones.item())
             # Corrected logic for extracting achievements
@@ -163,7 +165,8 @@ def collect_data(args, use_expert=False):
                 "observations": th.stack(episode_obs), # Length T+1
                 "rewards": np.array(episode_rewards), # Length T
                 "dones": np.array(episode_dones),     # Length T
-                "achievements": ach_array # Length T, shape (T, 22)
+                "achievements": ach_array, # Length T, shape (T, 22)
+                "health": np.array(episode_health), # Length T
             })
             print(f"Episode {i+1}/{args.num_episodes} finished. Length: {step_count} steps.")
         else:
@@ -217,78 +220,43 @@ def collect_data(args, use_expert=False):
     return all_episodes, device
 
 # --- Part 2: State Labeling Function ---
-# Mapping from achievement name string to index (0-21)
-TASK_TO_INDEX = {task: i for i, task in enumerate(TASKS)}
+def label_states_by_health_change(all_episodes: list) -> list:
+    """Labels each state based on whether health decreases in the next state."""
+    print("\n--- Part 2: Labeling States by Health Change ---")
+    labeled_data = []  # Will store tuples of (observation_tensor, label)
 
-def label_states_with_next_achievement(all_episodes: list) -> list:
-    """Labels each state in the collected episodes with the next achievement index."""
-    print("\n--- Part 2: Labeling States ---")
-    labeled_data = [] # Will store tuples of (observation_tensor, next_achievement_label)
-
-    # Process each episode
     for ep_idx, episode in enumerate(all_episodes):
-        observations = episode["observations"] # Shape (T+1, C, H, W)
-        rewards = episode["rewards"]           # Shape (T,)
-        achievements_over_time = episode["achievements"] # Shape (T, 22)
+        observations = episode["observations"]  # Shape (T+1, C, H, W)
+        health_over_time = episode["health"]      # Shape (T,)
 
-        episode_len = len(rewards) # Number of steps T
-        if episode_len == 0:
+        if len(health_over_time) == 0:
             continue
 
-        goal_steps_dict = {} # Map step_index -> achievement_index
+        # Prepend initial health (Crafter starts with 9)
+        # health_over_time[t] is health at s_{t+1}
+        # So full_health[t] is health at s_t
+        initial_health = np.array([9.0])
+        full_health = np.concatenate((initial_health, health_over_time)) # Shape (T+1,)
 
-        # Pad achievements_over_time with initial state (all zeros)
-        initial_achievements = np.zeros((1, len(TASKS)), dtype=achievements_over_time.dtype)
-        full_achievements = np.vstack((initial_achievements, achievements_over_time)) # Shape (T+1, 22)
+        # Label each state s_t based on health change at s_{t+1}
+        for t in range(len(health_over_time)): # For s_0 to s_{T-1}
+            current_health = full_health[t]
+            next_health = full_health[t+1]
 
-        # Find where *any* achievement status changes from 0 to 1 (or just changes)
-        diff = np.diff(full_achievements, axis=0) # Shape (T, 22), shows changes between steps
-
-        # Filter to find *newly* unlocked achievements (where diff is +1)
-        newly_unlocked_indices = np.where(diff == 1) # Tuple: (array of rows, array of cols)
-        goal_steps_indices = newly_unlocked_indices[0] # Step index t (0 to T-1) where change occurred
-        unlocked_achievement_indices = newly_unlocked_indices[1] # Which achievement (0-21) changed
-
-        for step_idx, ach_idx in zip(goal_steps_indices, unlocked_achievement_indices):
-            actual_step_of_unlock = step_idx + 1 # Index from 1 to T
-            goal_steps_dict[actual_step_of_unlock] = ach_idx
-
-        sorted_goal_steps = sorted(goal_steps_dict.keys())
-
-        # Label each state s_0 to s_T
-        for t in range(episode_len + 1):
-            next_achievement_label = -1 # Default: No future achievement
-
-            found_next = False
-            for goal_step in sorted_goal_steps:
-                # Goal step is index 1 to T, representing unlock *after* step t-1
-                # We need goal_step > t (current state index 0 to T)
-                if goal_step > t:
-                    next_achievement_label = goal_steps_dict[goal_step]
-                    found_next = True
-                    break
-
-            labeled_data.append((observations[t], next_achievement_label))
+            # Label is 1 if health decreases, 0 otherwise
+            label = 1 if next_health < current_health else 0
+            labeled_data.append((observations[t], label))
 
     print(f"--- Labeling Complete ---")
     print(f"Total labeled states: {len(labeled_data)}")
 
-     # Verification Print
+    # Verification Print
     if labeled_data:
-        print("\nExample labeled data points (Observation Tensor, Next Achievement Label):")
-        label_counts = {}
-        for i in range(min(10, len(labeled_data))):
-             obs_tensor, label = labeled_data[i]
-             print(f"  Data point {i}: Obs shape={obs_tensor.shape}, Label={label}")
-             label_counts[label] = label_counts.get(label, 0) + 1 # Count labels in sample
-
-        print(f"\nLabel counts in full dataset:")
-        full_label_counts = {}
-        for _, label in labeled_data:
-            full_label_counts[label] = full_label_counts.get(label, 0) + 1
-        # Sort by label for readability
-        sorted_counts = dict(sorted(full_label_counts.items()))
-        print(f"  {sorted_counts}")
+        labels = [label for _, label in labeled_data]
+        label_counts = Counter(labels)
+        print(f"\nLabel distribution:")
+        print(f"  - 0 (No Decrease): {label_counts.get(0, 0)} states")
+        print(f"  - 1 (Decrease):    {label_counts.get(1, 0)} states")
 
     return labeled_data
 
@@ -298,53 +266,41 @@ def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, ra
     """Subsamples the labeled data into fixed-size training and testing sets."""
     print("\n--- Part 3: Creating Train/Test Splits ---")
 
-    # Filter out data with label -1 (no future achievement)
-    filtered_data = [item for item in labeled_data if item[1] != -1]
+    if len(labeled_data) < train_size + test_size:
+        print(f"Warning: Not enough data ({len(labeled_data)}) to create a train/test split of size {train_size}/{test_size}.")
+        print("This may be due to a lack of health-decreasing events.")
+        print("Exiting.")
+        return None, None, None, None
+
+    # Subsample the data as per the specified sizes
+    random.seed(random_state)
+    random.shuffle(labeled_data)
     
-    # Pre-split filtering: Remove classes with too few members for stratification
-    if filtered_data:
-        labels_for_counting = [label for _, label in filtered_data]
-        label_counts = Counter(labels_for_counting)
-        
-        # Identify labels with fewer than 2 samples (the minimum for stratification)
-        rare_labels = {label for label, count in label_counts.items() if count < 2}
-        
-        if rare_labels:
-            print(f"Warning: The following labels have only 1 sample and will be removed to allow for stratified splitting: {sorted(list(rare_labels))}")
-            original_count = len(filtered_data)
-            filtered_data = [item for item in filtered_data if item[1] not in rare_labels]
-            print(f"Removed {original_count - len(filtered_data)} samples corresponding to these rare labels.")
+    train_samples = labeled_data[:train_size]
+    test_samples = labeled_data[train_size : train_size + test_size]
+    
+    X_train_list, y_train_list = zip(*train_samples)
+    X_test_list, y_test_list = zip(*test_samples)
 
-    if len(filtered_data) < train_size + test_size:
-        print(f"Warning: Not enough data ({len(filtered_data)}) to create a train/test split of size {train_size}/{test_size}.")
-        print("Using all available data with an 80/20 split instead.")
-        # Fallback to percentage-based split if not enough data
-        observations, labels = zip(*filtered_data)
-        observations_tensor = th.stack(observations)
-        labels_tensor = th.tensor(labels, dtype=th.long)
-        X_train, X_test, y_train, y_test = train_test_split(
-            observations_tensor, labels_tensor,
-            test_size=0.2, random_state=random_state, stratify=labels_tensor
-        )
-    else:
-        # Subsample the data as per the paper's methodology
-        random.seed(random_state)
-        random.shuffle(filtered_data)
-        
-        train_samples = filtered_data[:train_size]
-        test_samples = filtered_data[train_size : train_size + test_size]
-        
-        X_train_list, y_train_list = zip(*train_samples)
-        X_test_list, y_test_list = zip(*test_samples)
-
-        X_train = th.stack(X_train_list)
-        y_train = th.tensor(y_train_list, dtype=th.long)
-        X_test = th.stack(X_test_list)
-        y_test = th.tensor(y_test_list, dtype=th.long)
+    X_train = th.stack(X_train_list)
+    y_train = th.tensor(y_train_list, dtype=th.long)
+    X_test = th.stack(X_test_list)
+    y_test = th.tensor(y_test_list, dtype=th.long)
 
     print(f"Data split into training and testing sets:")
     print(f"  - Training set size: {len(X_train)}")
     print(f"  - Testing set size:  {len(X_test)}")
+
+    # Report label distribution in splits
+    train_counts = Counter(y_train.numpy())
+    test_counts = Counter(y_test.numpy())
+    print("\nLabel distribution in splits:")
+    print(f"  Training Set:")
+    print(f"    - 0 (No Decrease): {train_counts.get(0, 0)}")
+    print(f"    - 1 (Decrease):    {train_counts.get(1, 0)}")
+    print(f"  Test Set:")
+    print(f"    - 0 (No Decrease): {test_counts.get(0, 0)}")
+    print(f"    - 1 (Decrease):    {test_counts.get(1, 0)}")
     
     return X_train, X_test, y_train, y_test
 
@@ -419,17 +375,13 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
             all_labels.extend(labels_batch.cpu().numpy())
             
     accuracy = 100 * np.sum(np.array(all_preds) == np.array(all_labels)) / len(all_labels)
-    median_confidence = np.median(all_confidences)
     
     print(f"\n--- Evaluation Complete ---")
     print(f"Final Test Accuracy: {accuracy:.2f}%")
-    print(f"Median Prediction Confidence on Ground-Truth Labels: {median_confidence:.4f}")
 
     # --- Detailed Report ---
     print("\n--- Classification Report ---")
-    # Get the names of all unique labels present in the test set
-    unique_labels = np.unique(all_labels)
-    target_names = [TASKS[i] for i in unique_labels]
+    target_names = ['No-Decrease', 'Decrease']
     print(classification_report(all_labels, all_preds, target_names=target_names))
 
     # --- Confusion Matrix ---
@@ -437,23 +389,6 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
     cm = confusion_matrix(all_labels, all_preds)
     print("Columns: Predicted, Rows: Actual")
     print(cm)
-
-    return all_confidences
-
-
-# --- Part 6: Visualize Confidence ---
-def plot_confidence_density(confidences, save_path="confidence_density.png"):
-    """Generates and saves a density plot for prediction confidences."""
-    print(f"\n--- Part 6: Generating Confidence Density Plot ---")
-    plt.figure(figsize=(8, 6))
-    sns.kdeplot(confidences, fill=True)
-    plt.xlabel("Confidence (Probability of Ground-Truth Label)")
-    plt.ylabel("Density")
-    plt.title("Prediction Confidence Distribution")
-    plt.xlim(0, 1)
-    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    plt.savefig(save_path)
-    print(f"Density plot saved to: {save_path}")
 
 
 def load_analysis_model(exp_name, timestamp, train_seed, ckpt_epoch, device):
@@ -541,7 +476,7 @@ if __name__ == "__main__":
     )
 
     # --- Run Part 2: Labeling States ---
-    labeled_state_data = label_states_with_next_achievement(collected_episodes)
+    labeled_state_data = label_states_by_health_change(collected_episodes)
 
     # --- Run Part 3: Create Train/Test Splits ---
     X_train, X_test, y_train, y_test = create_train_test_splits(labeled_state_data)
@@ -566,13 +501,9 @@ if __name__ == "__main__":
         print(f"  - Testing latents:  {X_test_latents.shape}")
 
         # --- Run Part 5: Train and Evaluate Classifier ---
-        num_classes = len(TASKS) # 22 achievements
-        confidences = train_and_evaluate_classifier(
+        num_classes = 2 # No-Decrease vs Decrease
+        train_and_evaluate_classifier(
             X_train_latents, y_train, X_test_latents, y_test, num_classes, device
         )
-        
-        # --- Run Part 6: Visualize Confidence ---
-        if confidences:
-            plot_confidence_density(confidences)
     
     print("\nScript finished.")
