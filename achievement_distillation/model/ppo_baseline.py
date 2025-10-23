@@ -1,6 +1,7 @@
 from typing import Dict
 
 import torch as th
+import torch.nn as nn
 
 from gym import spaces
 
@@ -33,13 +34,10 @@ class PPOModelBaseline(BaseModel):
         #     **impala_kwargs,
         # )
         self.enc = SimpleCNNEncoder(obs_shape, hidsize)
-        outsize = impala_kwargs["outsize"]
-        self.linear = FanInInitReLULayer(
-            outsize,
-            hidsize,
-            layer_type="linear",
-            **dense_init_norm_kwargs,
-        )
+        # BUG: This was taking outsize from impala_kwargs, which isn't used.
+        # The SimpleCNNEncoder outputs a flat vector of size `hidsize`.
+        # The subsequent linear layer is therefore redundant.
+        self.linear = nn.Identity()
         self.hidsize = hidsize
 
         # Heads
@@ -102,7 +100,7 @@ class PPOModelBaseline(BaseModel):
     def encode(self, obs: th.Tensor) -> th.Tensor:
         # Pass through encoder
         x = self.enc(obs)
-        x = self.linear(x)
+        # x = self.linear(x) # No longer needed, self.linear is Identity
 
         return x
 
