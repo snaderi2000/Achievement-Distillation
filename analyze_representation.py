@@ -28,7 +28,7 @@ from achievement_distillation.wrapper import VecPyTorch
 from achievement_distillation.constant import TASKS
 
 # --- Part 1: Data Collection Function ---
-def collect_data(args, use_expert=False):
+def collect_data(args, device, use_expert=False):
     """Loads a specified model and collects episode data."""
 
     if use_expert:
@@ -36,14 +36,16 @@ def collect_data(args, use_expert=False):
         timestamp = args.expert_timestamp
         train_seed = args.expert_train_seed
         ckpt_epoch = args.expert_ckpt_epoch
-        config_path = f"configs/{exp_name}.yaml"
+        # Correctly use the expert's config file
+        config_path = f"configs/{args.expert_exp_name}.yaml"
         print("--- Part 1: Loading EXPERT Model & Collecting Data ---")
     else:
         exp_name = args.exp_name
         timestamp = args.timestamp
         train_seed = args.train_seed
         ckpt_epoch = args.ckpt_epoch
-        config_path = f"configs/{exp_name}.yaml"
+        # Use the analysis model's config for self-evaluation
+        config_path = f"configs/{args.exp_name}.yaml"
         print("--- Part 1: Loading Model & Collecting Data (Self-Evaluation) ---")
 
     # --- Load Config for the data collection model ---
@@ -63,8 +65,6 @@ def collect_data(args, use_expert=False):
     print(f"Set random seed for evaluation run: {args.eval_seed}")
 
     th.set_num_threads(1)
-    cuda = th.cuda.is_available()
-    device = th.device("cuda:0" if cuda else "cpu")
     print(f"Using device: {device}")
 
     # --- Load Your PPO Model ---
@@ -214,7 +214,7 @@ def collect_data(args, use_expert=False):
     else:
         print(f"\nSUCCESS: A total of {total_achievements_unlocked} achievements were unlocked across all episodes.")
 
-    return all_episodes, device
+    return all_episodes
 
 # --- Part 2: State Labeling Function ---
 # Mapping from achievement name string to index (0-21)
@@ -362,7 +362,7 @@ def extract_latent_vectors(model, data_loader, device):
     return th.cat(latent_vectors, dim=0)
 
 # --- Part 5: Train and Evaluate Classifier ---
-def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_test, num_classes, device):
+def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_test, num_classes, device, exp_name):
     """Trains and evaluates a linear classifier on the latent vectors."""
     print("\n--- Part 5: Training and Evaluating Classifier ---")
     
@@ -409,10 +409,10 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
             latents_batch, labels_batch = latents_batch.to(device), labels_batch.to(device)
             outputs = classifier(latents_batch)
             
-            # Calculate confidence (softmax probability of the ground-truth class)
+            # Correct: Confidence = max softmax probability (model certainty)
             probs = F.softmax(outputs, dim=1)
-            gt_confidences = probs[range(len(labels_batch)), labels_batch].cpu().numpy()
-            all_confidences.extend(gt_confidences)
+            pred_confidences = probs.max(dim=1)[0].cpu().numpy()
+            all_confidences.extend(pred_confidences)
 
             _, predicted = th.max(outputs.data, 1)
             all_preds.extend(predicted.cpu().numpy())
@@ -438,22 +438,27 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
     print("Columns: Predicted, Rows: Actual")
     print(cm)
 
+    np.save(f"conf_{exp_name}.npy", np.array(all_confidences))
+    print(f"Confidence values saved to: conf_{exp_name}.npy")
+
     return all_confidences
 
 
 # --- Part 6: Visualize Confidence ---
 def plot_confidence_density(confidences, save_path="confidence_density.png"):
-    """Generates and saves a density plot for prediction confidences."""
     print(f"\n--- Part 6: Generating Confidence Density Plot ---")
     plt.figure(figsize=(8, 6))
-    sns.kdeplot(confidences, fill=True)
-    plt.xlabel("Confidence (Probability of Ground-Truth Label)")
+
+    # 20 bins, density normalized = matches paper style
+    plt.hist(confidences, bins=20, range=(0,1), density=True, alpha=0.6, color='blue', edgecolor='black')
+
+    plt.xlabel("Confidence")
     plt.ylabel("Density")
     plt.title("Prediction Confidence Distribution")
     plt.xlim(0, 1)
-    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+    plt.grid(alpha=0.3)
     plt.savefig(save_path)
-    print(f"Density plot saved to: {save_path}")
+    print(f"Histogram saved to: {save_path}")
 
 
 def load_analysis_model(exp_name, timestamp, train_seed, ckpt_epoch, device):
@@ -523,25 +528,76 @@ if __name__ == "__main__":
     # General arguments
     parser.add_argument("--eval_seed", type=int, default=123, help="Seed for evaluation env")
     parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to collect")
+
+    # Data handling arguments
+    parser.add_argument("--output_dataset_path", type=str, default=None, help="If provided, save the collected and labeled dataset to this path.")
+    parser.add_argument("--load_dataset_path", type=str, default=None, help="If provided, load a pre-existing labeled dataset from this path, skipping collection.")
     args = parser.parse_args()
 
-    # --- Run Part 1: Data Collection ---
-    use_expert = bool(args.expert_exp_name)
-    if use_expert:
-        # Ensure all expert args are provided if expert_exp_name is set
-        if not all([args.expert_timestamp, args.expert_train_seed is not None]):
-            print("Error: If --expert_exp_name is used, you must provide --expert_timestamp and --expert_train_seed.")
-            sys.exit(1)
-    
-    collected_episodes, device = collect_data(args, use_expert=use_expert)
+    # --- Argument Validation ---
+    if args.output_dataset_path and args.load_dataset_path:
+        print("Error: Cannot use --output_dataset_path and --load_dataset_path simultaneously.")
+        sys.exit(1)
 
+    # --- Global Setup ---
+    cuda = th.cuda.is_available()
+    device = th.device("cuda:0" if cuda else "cpu")
+    print(f"--- Global Setup ---")
+    print(f"Using device: {device}")
+
+
+    # --- Part A: Data Generation or Loading ---
+    if args.load_dataset_path:
+        print(f"\n--- Loading Dataset from {args.load_dataset_path} ---")
+        if not os.path.exists(args.load_dataset_path):
+            print(f"Error: Dataset file not found at {args.load_dataset_path}")
+            sys.exit(1)
+        try:
+            labeled_state_data = th.load(args.load_dataset_path)
+            print("Dataset loaded successfully.")
+        except Exception as e:
+            print(f"Error loading dataset: {e}")
+            sys.exit(1)
+    else:
+        # --- Run Part 1: Data Collection ---
+        use_expert = bool(args.expert_exp_name)
+        if use_expert:
+            # Ensure all expert args are provided if expert_exp_name is set
+            if not all([args.expert_timestamp, args.expert_train_seed is not None]):
+                print("Error: If --expert_exp_name is used, you must provide --expert_timestamp and --expert_train_seed.")
+                sys.exit(1)
+        
+        collected_episodes = collect_data(args, device, use_expert=use_expert)
+
+        # --- Run Part 2: Labeling States ---
+        labeled_state_data = label_states_with_next_achievement(collected_episodes)
+
+        if args.output_dataset_path:
+            print(f"\n--- Saving Labeled Dataset to {args.output_dataset_path} ---")
+            try:
+                th.save(labeled_state_data, args.output_dataset_path)
+                print("Dataset saved successfully.")
+            except Exception as e:
+                print(f"Error saving dataset: {e}")
+
+    # --- Part B: Analysis (applies to both generated and loaded data) ---
     # --- Load the ANALYSIS Model ---
     analysis_model = load_analysis_model(
         args.exp_name, args.timestamp, args.train_seed, args.ckpt_epoch, device
     )
 
-    # --- Run Part 2: Labeling States ---
-    labeled_state_data = label_states_with_next_achievement(collected_episodes)
+    # Freeze encoder (IMPORTANT)
+    analysis_model.eval()
+    for name, param in analysis_model.named_parameters():
+        param.requires_grad = False
+    print("✅ Encoder frozen. Trainable parameters should now be only classifier.")
+
+    # Add This Debug Check
+    print("---- Trainable Parameters After Freezing ----")
+    for name, param in analysis_model.named_parameters():
+        if param.requires_grad:
+            print("❗ STILL TRAINABLE:", name)
+
 
     # --- Run Part 3: Create Train/Test Splits ---
     X_train, X_test, y_train, y_test = create_train_test_splits(labeled_state_data)
@@ -568,7 +624,7 @@ if __name__ == "__main__":
         # --- Run Part 5: Train and Evaluate Classifier ---
         num_classes = len(TASKS) # 22 achievements
         confidences = train_and_evaluate_classifier(
-            X_train_latents, y_train, X_test_latents, y_test, num_classes, device
+            X_train_latents, y_train, X_test_latents, y_test, num_classes, device, args.exp_name
         )
         
         # --- Run Part 6: Visualize Confidence ---

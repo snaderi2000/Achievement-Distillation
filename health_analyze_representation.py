@@ -220,31 +220,34 @@ def collect_data(args, use_expert=False):
     return all_episodes, device
 
 # --- Part 2: State Labeling Function ---
-def label_states_by_health_change(all_episodes: list) -> list:
-    """Labels each state based on whether health decreases in the next state."""
-    print("\n--- Part 2: Labeling States by Health Change ---")
+def label_states_by_health_change(all_episodes: list, lookahead_horizon: int = 5) -> list:
+    """Labels each state based on whether health decreases in the next N steps."""
+    print(f"\n--- Part 2: Labeling States by Health Change (lookahead={lookahead_horizon}) ---")
     labeled_data = []  # Will store tuples of (observation_tensor, label)
 
     for ep_idx, episode in enumerate(all_episodes):
         observations = episode["observations"]  # Shape (T+1, C, H, W)
         health_over_time = episode["health"]      # Shape (T,)
+        episode_len = len(health_over_time)
 
-        if len(health_over_time) == 0:
+        if episode_len == 0:
             continue
 
         # Prepend initial health (Crafter starts with 9)
-        # health_over_time[t] is health at s_{t+1}
-        # So full_health[t] is health at s_t
+        # full_health[t] is the health at state s_t
         initial_health = np.array([9.0])
         full_health = np.concatenate((initial_health, health_over_time)) # Shape (T+1,)
 
-        # Label each state s_t based on health change at s_{t+1}
-        for t in range(len(health_over_time)): # For s_0 to s_{T-1}
-            current_health = full_health[t]
-            next_health = full_health[t+1]
-
-            # Label is 1 if health decreases, 0 otherwise
-            label = 1 if next_health < current_health else 0
+        # Label each state s_t based on future health changes
+        for t in range(episode_len): # For s_0 to s_{T-1}
+            label = 0
+            # Look ahead up to N steps for a health decrease.
+            # A health decrease happens at step k if health at k+1 is less than health at k.
+            for k in range(t, min(t + lookahead_horizon, episode_len)):
+                if full_health[k+1] < full_health[k]:
+                    label = 1
+                    break  # Found a decrease, no need to look further for this s_t
+            
             labeled_data.append((observations[t], label))
 
     print(f"--- Labeling Complete ---")
