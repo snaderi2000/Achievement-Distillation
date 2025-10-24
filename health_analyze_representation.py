@@ -345,7 +345,15 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
     input_dim = X_train_latents.shape[1]
     classifier = nn.Linear(input_dim, num_classes).to(device)
     optimizer = optim.Adam(classifier.parameters(), lr=1e-3)
-    criterion = nn.CrossEntropyLoss()
+
+    # --- Class Weighting for Imbalanced Dataset ---
+    class_counts = np.bincount(y_train.cpu().numpy())
+    # weight = max_count / count_for_this_class
+    class_weights = class_counts.max() / class_counts
+    class_weights_tensor = th.tensor(class_weights, dtype=th.float).to(device)
+    print(f"Using class weights: [No-Decrease: {class_weights[0]:.2f}, Decrease: {class_weights[1]:.2f}]")
+
+    criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
     
     train_dataset = TensorDataset(X_train_latents, y_train)
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
