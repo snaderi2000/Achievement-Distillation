@@ -596,7 +596,7 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
 
 
 # --- Part 6: Visualize Confidence ---
-def plot_confidence_distribution(conf_dict, save_path="confidence_comparison.png"):
+def plot_confidence_density(conf_dict, save_path="confidence_comparison.png"):
     """
     conf_dict: {"PPO": np.ndarray, "Ours": np.ndarray}
     """
