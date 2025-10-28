@@ -405,8 +405,14 @@ def extract_latent_vectors(model, data_loader, device):
     with th.no_grad():
         for observations_batch in data_loader:
             observations_batch = observations_batch[0].to(device)
-            # Use model.enc to get pre-activation features, bypassing the final ReLU in model.encode
-            latents = model.enc(observations_batch)
+            
+            # Manually execute the forward pass of the ImpalaCNN to get the pre-activation features.
+            # This is the true pre-ReLU latent space.
+            x = observations_batch
+            for stack in model.enc.stacks:
+                x = stack(x)
+            latents = x.reshape(x.size(0), -1)
+
             if isinstance(latents, (tuple, list)):
                 latents = latents[0]
             assert latents.ndim == 2, f"Unexpected latent shape {latents.shape}"
