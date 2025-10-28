@@ -345,7 +345,12 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
 
 
 # --- Part 3: Create Train/Test Splits ---
-def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, random_state=220):
+def create_train_test_splits(
+    labeled_data, 
+    train_size=None, 
+    test_size=None, 
+    random_state=None
+):
     """Subsamples the labeled data into fixed-size training and testing sets."""
     print("\n--- Part 3: Creating Train/Test Splits ---")
 
@@ -503,7 +508,7 @@ def extract_latent_vectors(model, data_loader, device, use_full_encoder=False, u
     return th.cat(latent_vectors, dim=0)
 
 # --- Part 5: Train and Evaluate Classifier ---
-def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_test, num_classes, device, exp_name, num_epochs=500, random_state=42):
+def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_test, num_classes, device, exp_name, num_epochs=500, random_state=420):
     """Trains and evaluates a linear classifier on the latent vectors."""
     print("\n--- Part 5: Training and Evaluating Classifier ---")
     
@@ -722,10 +727,15 @@ if __name__ == "__main__":
     parser.add_argument("--eval_seed", type=int, default=123, help="Seed for evaluation env")
     parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to collect")
     parser.add_argument("--classifier_epochs", type=int, default=500, help="Number of epochs to train the linear classifier.")
+    parser.add_argument("--split_seed", type=int, default=22, help="Seed for train/test split.")
+    parser.add_argument("--classifier_seed", type=int, default=420, help="Seed for classifier training.")
+
 
     # Data handling arguments
     parser.add_argument("--output_dataset_path", type=str, default=None, help="If provided, save the collected and labeled dataset to this path.")
     parser.add_argument("--load_dataset_path", type=str, default=None, help="If provided, load a pre-existing labeled dataset from this path, skipping collection.")
+    parser.add_argument("--train_size", type=int, default=50000, help="Size of the training set.")
+    parser.add_argument("--test_size", type=int, default=10000, help="Size of the test set.")
     
     # Representation extraction arguments
     parser.add_argument("--use_full_encoder", action="store_true", help="If set, extract from full encoder (1024-dim). Otherwise, extract from ImpalaCNN only (256-dim). Paper likely uses ImpalaCNN only.")
@@ -809,7 +819,12 @@ if __name__ == "__main__":
 
 
     # --- Run Part 3: Create Train/Test Splits ---
-    X_train, X_test, y_train, y_test = create_train_test_splits(labeled_state_data)
+    X_train, X_test, y_train, y_test = create_train_test_splits(
+        labeled_state_data,
+        train_size=args.train_size,
+        test_size=args.test_size,
+        random_state=args.split_seed
+    )
     
     if X_train is not None:
         X_train, y_train = balance_xy(X_train, y_train, max_per_class=1000, min_required=10)
@@ -875,7 +890,7 @@ if __name__ == "__main__":
         # --- Run Part 5: Train and Evaluate Classifier ---
         num_classes = len(TASKS) # 22 achievements
         confidences = train_and_evaluate_classifier(
-            X_train_latents, y_train, X_test_latents, y_test, num_classes, device, args.exp_name, num_epochs=args.classifier_epochs, random_state=args.eval_seed
+            X_train_latents, y_train, X_test_latents, y_test, num_classes, device, args.exp_name, num_epochs=args.classifier_epochs, random_state=args.classifier_seed
         )
         
         # --- Run Part 6: Visualize Confidence ---
