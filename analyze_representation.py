@@ -359,10 +359,23 @@ def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, ra
         observations, labels = zip(*filtered_data)
         observations_tensor = th.stack(observations)
         labels_tensor = th.tensor(labels, dtype=th.long)
-        X_train, X_test, y_train, y_test = train_test_split(
-            observations_tensor, labels_tensor,
-            test_size=0.2, random_state=random_state, stratify=labels_tensor
-        )
+        
+        # Check if stratification is possible
+        label_counts = Counter(labels_tensor.numpy())
+        min_class_count = min(label_counts.values())
+        
+        if min_class_count >= 2:
+            print(f"Using stratified split (min class count: {min_class_count})")
+            X_train, X_test, y_train, y_test = train_test_split(
+                observations_tensor, labels_tensor,
+                test_size=0.2, random_state=random_state, stratify=labels_tensor
+            )
+        else:
+            print(f"Warning: Some classes have only {min_class_count} sample(s). Using non-stratified split.")
+            X_train, X_test, y_train, y_test = train_test_split(
+                observations_tensor, labels_tensor,
+                test_size=0.2, random_state=random_state, stratify=None
+            )
     else:
         # Subsample the data and perform a stratified split
         random.seed(random_state)
@@ -381,14 +394,29 @@ def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, ra
         X_full = th.stack(X_list)
         y_full = th.tensor(y_list, dtype=th.long)
 
-        # Stratified split on the subsampled data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_full, y_full,
-            train_size=train_size,
-            test_size=test_size,
-            random_state=random_state,
-            stratify=y_full
-        )
+        # Check if stratification is possible with the subsampled data
+        label_counts = Counter(y_full.numpy())
+        min_class_count = min(label_counts.values())
+        
+        if min_class_count >= 2:
+            print(f"Using stratified split (min class count: {min_class_count})")
+            # Stratified split on the subsampled data
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_full, y_full,
+                train_size=train_size,
+                test_size=test_size,
+                random_state=random_state,
+                stratify=y_full
+            )
+        else:
+            print(f"Warning: Some classes have only {min_class_count} sample(s). Using non-stratified split.")
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_full, y_full,
+                train_size=train_size,
+                test_size=test_size,
+                random_state=random_state,
+                stratify=None
+            )
 
     print(f"Data split into training and testing sets:")
     print(f"  - Training set size: {len(X_train)}")
