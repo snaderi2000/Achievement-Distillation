@@ -387,8 +387,7 @@ def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, ra
             train_size=train_size,
             test_size=test_size,
             random_state=random_state,
-            shuffle=True,
-            stratify=None
+            stratify=y_full
         )
 
     print(f"Data split into training and testing sets:")
@@ -412,8 +411,8 @@ def extract_latent_vectors(model, data_loader, device):
             for stack in model.enc.stacks:
                 x = stack(x)
             x = x.reshape(x.size(0), -1)
-            # Access the internal .layer of the final FanInInitReLULayer to bypass the ReLU
-            latents = model.enc.dense.layer(x)
+            # Access the internal .layer of the final FanInInitReLULayer and apply ReLU
+            latents = F.relu(model.enc.dense.layer(x))
 
             if isinstance(latents, (tuple, list)):
                 latents = latents[0]
