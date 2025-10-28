@@ -424,6 +424,28 @@ def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, ra
     
     return X_train, X_test, y_train, y_test
 
+def balance_xy(X, y, max_per_class=None, min_required=5):
+    y_np = y.cpu().numpy() if hasattr(y, 'cpu') else np.array(y)
+    cls2idx = {}
+    for i, c in enumerate(y_np):
+        cls2idx.setdefault(c, []).append(i)
+    # remove ultra-rare classes (optional): keep only classes with enough examples
+    cls2idx = {c: idxs for c, idxs in cls2idx.items() if len(idxs) >= min_required}
+    if not cls2idx:
+        raise ValueError("No class has enough samples; collect more data.")
+
+    min_count = min(len(idxs) for idxs in cls2idx.values())
+    if max_per_class is not None:
+        min_count = min(min_count, max_per_class)
+
+    keep = []
+    rng = np.random.default_rng(22)
+    for c, idxs in cls2idx.items():
+        sel = rng.choice(idxs, size=min_count, replace=False)
+        keep.extend(sel.tolist())
+    keep = np.array(keep)
+    return X[keep], y[keep]
+
 # --- Part 4: Extract Latent Representations ---
 def extract_latent_vectors(model, data_loader, device, use_full_encoder=False, use_pre_relu=False): # Added use_pre_relu flag
     """Extracts latent vectors from the model's encoder for a given dataset.
@@ -748,6 +770,8 @@ if __name__ == "__main__":
     X_train, X_test, y_train, y_test = create_train_test_splits(labeled_state_data)
     
     if X_train is not None:
+        X_train, y_train = balance_xy(X_train, y_train, max_per_class=1000, min_required=10)
+        X_test,  y_test  = balance_xy(X_test,  y_test,  max_per_class=200,  min_required=10)
         print(X_train[0].max(), X_train[0].mean())
         # --- Dataset Sanity Check ---
         print("\n--- Dataset Sanity Check ---")
