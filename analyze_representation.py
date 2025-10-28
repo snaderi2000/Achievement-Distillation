@@ -443,6 +443,8 @@ def extract_latent_vectors(model, data_loader, device, use_full_encoder=False, u
     with th.no_grad():
         for observations_batch in data_loader:
             observations_batch = observations_batch[0].to(device)
+            if observations_batch.max() > 1.0:
+                observations_batch = observations_batch / 255.0
 
             if use_full_encoder:
                 # Full encoder: CNN + dense(256) + linear(1024)
@@ -746,6 +748,7 @@ if __name__ == "__main__":
     X_train, X_test, y_train, y_test = create_train_test_splits(labeled_state_data)
     
     if X_train is not None:
+        print(X_train[0].max(), X_train[0].mean())
         # --- Dataset Sanity Check ---
         print("\n--- Dataset Sanity Check ---")
         label_counts = Counter(y_train.cpu().numpy())
