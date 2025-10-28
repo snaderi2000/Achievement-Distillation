@@ -397,17 +397,30 @@ def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, ra
     return X_train, X_test, y_train, y_test
 
 # --- Part 4: Extract Latent Representations ---
-def extract_latent_vectors(model, data_loader, device):
-    """Extracts latent vectors from the model's encoder for a given dataset."""
+def extract_latent_vectors(model, data_loader, device, use_full_encoder=False):
+    """Extracts latent vectors from the model's encoder for a given dataset.
+    
+    Args:
+        model: The model to extract representations from
+        data_loader: DataLoader with observations
+        device: Device to use
+        use_full_encoder: If True, uses model.encode() [1024-dim for PPO].
+                         If False, uses model.enc() [256-dim for PPO, the ImpalaCNN output].
+                         The paper likely uses False (ImpalaCNN output only).
+    """
     model.eval()
     latent_vectors = []
     with th.no_grad():
         for observations_batch in data_loader:
             observations_batch = observations_batch[0].to(device)
             
-            # Use the full encoder output (model.encode), which includes the second dense layer.
-            # This corresponds to the final latent representation before the policy/value heads.
-            latents = model.encode(observations_batch)
+            if use_full_encoder:
+                # Full encoder: CNN + dense(256) + linear(1024)
+                latents = model.encode(observations_batch)
+            else:
+                # ImpalaCNN only: CNN + dense(256)
+                # This is likely what the paper uses when referring to "encoder"
+                latents = model.enc(observations_batch)
 
             if isinstance(latents, (tuple, list)):
                 latents = latents[0]
@@ -598,6 +611,10 @@ if __name__ == "__main__":
     # Data handling arguments
     parser.add_argument("--output_dataset_path", type=str, default=None, help="If provided, save the collected and labeled dataset to this path.")
     parser.add_argument("--load_dataset_path", type=str, default=None, help="If provided, load a pre-existing labeled dataset from this path, skipping collection.")
+    
+    # Representation extraction arguments
+    parser.add_argument("--use_full_encoder", action="store_true", help="If set, extract from full encoder (1024-dim). Otherwise, extract from ImpalaCNN only (256-dim). Paper likely uses ImpalaCNN only.")
+    
     args = parser.parse_args()
 
     # --- Argument Validation ---
@@ -695,10 +712,10 @@ if __name__ == "__main__":
         test_obs_dataset = TensorDataset(X_test)
         test_obs_loader = DataLoader(test_obs_dataset, batch_size=256)
 
-        print("Extracting latents for training set...")
-        X_train_latents = extract_latent_vectors(analysis_model, train_obs_loader, device)
-        print("Extracting latents for testing set...")
-        X_test_latents = extract_latent_vectors(analysis_model, test_obs_loader, device)
+        print(f"Extracting latents for training set (use_full_encoder={args.use_full_encoder})...")
+        X_train_latents = extract_latent_vectors(analysis_model, train_obs_loader, device, use_full_encoder=args.use_full_encoder)
+        print(f"Extracting latents for testing set (use_full_encoder={args.use_full_encoder})...")
+        X_test_latents = extract_latent_vectors(analysis_model, test_obs_loader, device, use_full_encoder=args.use_full_encoder)
 
         print(f"Latent vector shapes:")
         print(f"  - Training latents: {X_train_latents.shape}")
@@ -708,15 +725,30 @@ if __name__ == "__main__":
         with th.no_grad():
             sample_batch = X_train[:32] # Use a small batch of observations
             x = sample_batch.to(device)
-            for stack in analysis_model.enc.stacks:
-                x = stack(x)
-            x = x.reshape(x.size(0), -1)
-            pre_relu = analysis_model.enc.dense.layer(x)
-            post_relu = F.relu(pre_relu)
+            
+            # Check statistics at the final layer we're using
+            if args.use_full_encoder:
+                # Using full encoder: check the second linear layer
+                enc_out = analysis_model.enc(x)
+                if hasattr(analysis_model, 'linear') and hasattr(analysis_model.linear, 'layer'):
+                    pre_relu = analysis_model.linear.layer(enc_out)
+                    post_relu = F.relu(pre_relu)
+                    layer_name = "second linear layer"
+                else:
+                    pre_relu = post_relu = enc_out
+                    layer_name = "encoder output (no second layer)"
+            else:
+                # Using ImpalaCNN only: check the dense layer
+                for stack in analysis_model.enc.stacks:
+                    x = stack(x)
+                x = x.reshape(x.size(0), -1)
+                pre_relu = analysis_model.enc.dense.layer(x)
+                post_relu = F.relu(pre_relu)
+                layer_name = "ImpalaCNN dense layer"
 
             neg_frac = (pre_relu < 0).float().mean().item()
             zero_frac = (post_relu == 0).float().mean().item()
-            print(f"\n--- Latent Vector Sanity Check ---")
+            print(f"\n--- Latent Vector Sanity Check ({layer_name}) ---")
             print(f"Fraction negative before ReLU: {neg_frac:.3f}")
             print(f"Fraction zero after ReLU: {zero_frac:.3f}")
             print(f"Mean pre-ReLU: {pre_relu.mean():.3f}, std: {pre_relu.std():.3f}")
