@@ -667,16 +667,6 @@ if __name__ == "__main__":
         args.exp_name, args.timestamp, args.train_seed, args.ckpt_epoch, device
     )
 
-    # --- Diagnostic: Print Encoder Architecture ---
-    print("\n--- Encoder Architecture ---")
-    print(analysis_model.enc)
-
-    print("\n--- Encoder Modules ---")
-    for name, module in analysis_model.enc.named_modules():
-        if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
-            print(f"{name:40s} | weight {tuple(module.weight.shape)} | bias {module.bias is not None}")
-
-
     # Freeze encoder (IMPORTANT)
     analysis_model.eval()
     for name, param in analysis_model.named_parameters():
