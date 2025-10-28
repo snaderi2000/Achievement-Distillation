@@ -351,20 +351,6 @@ def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, ra
     # Filter out data with label -1 (no future achievement)
     filtered_data = [item for item in labeled_data if item[1] != -1]
     
-    # Pre-split filtering: Remove classes with too few members for stratification
-    if filtered_data:
-        labels_for_counting = [label for _, label in filtered_data]
-        label_counts = Counter(labels_for_counting)
-        
-        # Identify labels with fewer than 2 samples (the minimum for stratification)
-        rare_labels = {label for label, count in label_counts.items() if count < 2}
-        
-        if rare_labels:
-            print(f"Warning: The following labels have only 1 sample and will be removed to allow for stratified splitting: {sorted(list(rare_labels))}")
-            original_count = len(filtered_data)
-            filtered_data = [item for item in filtered_data if item[1] not in rare_labels]
-            print(f"Removed {original_count - len(filtered_data)} samples corresponding to these rare labels.")
-
     if len(filtered_data) < train_size + test_size:
         print(f"Warning: Not enough data ({len(filtered_data)}) to create a train/test split of size {train_size}/{test_size}.")
         print("Using all available data with an 80/20 split instead.")
@@ -400,7 +386,8 @@ def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, ra
             train_size=train_size,
             test_size=test_size,
             random_state=random_state,
-            stratify=y_full
+            shuffle=True,
+            stratify=None
         )
 
     print(f"Data split into training and testing sets:")
@@ -430,14 +417,8 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
     # --- Setup ---
     input_dim = X_train_latents.shape[1]
 
-    # Standardize features
-    mu = X_train_latents.mean(dim=0, keepdim=True)
-    sigma = X_train_latents.std(dim=0, keepdim=True).clamp_min(1e-6)
-    X_train_latents = (X_train_latents - mu) / sigma
-    X_test_latents  = (X_test_latents  - mu) / sigma
-
     classifier = nn.Linear(input_dim, num_classes).to(device)
-    optimizer = optim.Adam(classifier.parameters(), lr=1e-3, weight_decay=1e-4)
+    optimizer = optim.Adam(classifier.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss()
     
     train_dataset = TensorDataset(X_train_latents, y_train)
@@ -699,6 +680,13 @@ if __name__ == "__main__":
         print(f"Latent vector shapes:")
         print(f"  - Training latents: {X_train_latents.shape}")
         print(f"  - Testing latents:  {X_test_latents.shape}")
+
+        # Diagnostic: Check latent vector statistics
+        with th.no_grad():
+            sample_latents = X_train_latents[:32] # Use a small batch
+            print(f"\n--- Latent Vector Sanity Check ---")
+            print(f"  - Mean: {sample_latents.mean().item():.4f}")
+            print(f"  - Std Dev: {sample_latents.std().item():.4f}")
 
         # --- Run Part 5: Train and Evaluate Classifier ---
         num_classes = len(TASKS) # 22 achievements
