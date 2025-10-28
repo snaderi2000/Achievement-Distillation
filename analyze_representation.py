@@ -345,7 +345,7 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
 
 
 # --- Part 3: Create Train/Test Splits ---
-def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, random_state=22):
+def create_train_test_splits(labeled_data, train_size=100000, test_size=20000, random_state=22):
     """Subsamples the labeled data into fixed-size training and testing sets."""
     print("\n--- Part 3: Creating Train/Test Splits ---")
 
@@ -728,8 +728,8 @@ if __name__ == "__main__":
         print("\n--- Dataset Sanity Check ---")
         label_counts = Counter(y_train.cpu().numpy())
         print(f"Unique labels: {len(label_counts)} / {len(TASKS)} possible")
-        print("Top 10 most frequent labels:")
-        print(label_counts.most_common(10))
+        print(" labels:")
+        print(label_counts.most_common(len(label_counts)))
 
         # --- Run Part 4: Extract Latent Representations ---
         print("\n--- Part 4: Extracting Latent Representations ---")
