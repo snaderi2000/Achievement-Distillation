@@ -676,6 +676,13 @@ if __name__ == "__main__":
     X_train, X_test, y_train, y_test = create_train_test_splits(labeled_state_data)
     
     if X_train is not None:
+        # --- Dataset Sanity Check ---
+        print("\n--- Dataset Sanity Check ---")
+        label_counts = Counter(y_train.cpu().numpy())
+        print(f"Unique labels: {len(label_counts)} / {len(TASKS)} possible")
+        print("Top 10 most frequent labels:")
+        print(label_counts.most_common(10))
+
         # --- Run Part 4: Extract Latent Representations ---
         print("\n--- Part 4: Extracting Latent Representations ---")
         # Create DataLoaders for extraction
@@ -700,6 +707,8 @@ if __name__ == "__main__":
             print(f"\n--- Latent Vector Sanity Check ---")
             print(f"  - Mean: {sample_latents.mean().item():.4f}")
             print(f"  - Std Dev: {sample_latents.std().item():.4f}")
+            print(f"  - Fraction of negative entries: {(X_train_latents < 0).float().mean().item():.3f}")
+            print(f"  - Max abs latent value: {X_train_latents.abs().max().item():.2f}")
 
         # --- Run Part 5: Train and Evaluate Classifier ---
         num_classes = len(TASKS) # 22 achievements
