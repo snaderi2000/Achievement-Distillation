@@ -813,4 +813,3 @@ if __name__ == "__main__":
         if confidences:
             plot_confidence_density(confidences)
     
-   print("\nScript finished.")
