@@ -409,10 +409,11 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
             latents_batch, labels_batch = latents_batch.to(device), labels_batch.to(device)
             outputs = classifier(latents_batch)
             
-            # Correct: Confidence = max softmax probability (model certainty)
+            # Revert: Measure confidence on the ground-truth label, as per the paper's text.
+            # This is the probability the model assigned to the correct answer.
             probs = F.softmax(outputs, dim=1)
-            pred_confidences = probs.max(dim=1)[0].cpu().numpy()
-            all_confidences.extend(pred_confidences)
+            gt_confidences = probs[range(len(labels_batch)), labels_batch].cpu().numpy()
+            all_confidences.extend(gt_confidences)
 
             _, predicted = th.max(outputs.data, 1)
             all_preds.extend(predicted.cpu().numpy())
@@ -423,7 +424,7 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
     
     print(f"\n--- Evaluation Complete ---")
     print(f"Final Test Accuracy: {accuracy:.2f}%")
-    print(f"Median Prediction Confidence on Ground-Truth Labels: {median_confidence:.4f}")
+    print(f"Median Confidence on Ground-Truth Labels: {median_confidence:.4f}")
 
     # --- Detailed Report ---
     print("\n--- Classification Report ---")
