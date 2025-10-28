@@ -405,9 +405,16 @@ def extract_latent_vectors(model, data_loader, device):
     with th.no_grad():
         for observations_batch in data_loader:
             observations_batch = observations_batch[0].to(device)
-            # Use model.enc to get the direct output of the ImpalaCNN encoder.
-            # This is the correct, pre-policy-head latent space to probe.
-            latents = model.enc(observations_batch)
+            
+            # Manually step through the ImpalaCNN encoder to get the pre-ReLU features
+            # from the final dense layer. This is the true pre-activation latent space.
+            x = observations_batch
+            for stack in model.enc.stacks:
+                x = stack(x)
+            x = x.reshape(x.size(0), -1)
+            # Access the internal .layer of the final FanInInitReLULayer to bypass the ReLU
+            latents = model.enc.dense.layer(x)
+
             if isinstance(latents, (tuple, list)):
                 latents = latents[0]
             assert latents.ndim == 2, f"Unexpected latent shape {latents.shape}"
@@ -709,8 +716,8 @@ if __name__ == "__main__":
             print(f"\n--- Latent Vector Sanity Check ---")
             print(f"  - Mean: {sample_latents.mean().item():.4f}")
             print(f"  - Std Dev: {sample_latents.std().item():.4f}")
-            print(f"  - Fraction of negative entries: {(sample_latents < 0).float().mean().item():.3f}")
-            print(f"  - Max abs latent value: {sample_latents.abs().max().item():.2f}")
+            print(f"  - Fraction of negative entries: {(X_train_latents < 0).float().mean().item():.3f}")
+            print(f"  - Max abs latent value: {X_train_latents.abs().max().item():.2f}")
 
         # --- Run Part 5: Train and Evaluate Classifier ---
         num_classes = len(TASKS) # 22 achievements
