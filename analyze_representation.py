@@ -345,7 +345,7 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
 
 
 # --- Part 3: Create Train/Test Splits ---
-def create_train_test_splits(labeled_data, train_size=100000, test_size=20000, random_state=22):
+def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, random_state=22):
     """Subsamples the labeled data into fixed-size training and testing sets."""
     print("\n--- Part 3: Creating Train/Test Splits ---")
 
@@ -425,36 +425,57 @@ def create_train_test_splits(labeled_data, train_size=100000, test_size=20000, r
     return X_train, X_test, y_train, y_test
 
 # --- Part 4: Extract Latent Representations ---
-def extract_latent_vectors(model, data_loader, device, use_full_encoder=False):
+def extract_latent_vectors(model, data_loader, device, use_full_encoder=False, use_pre_relu=False): # Added use_pre_relu flag
     """Extracts latent vectors from the model's encoder for a given dataset.
-    
+
     Args:
         model: The model to extract representations from
         data_loader: DataLoader with observations
         device: Device to use
         use_full_encoder: If True, uses model.encode() [1024-dim for PPO].
-                         If False, uses model.enc() [256-dim for PPO, the ImpalaCNN output].
-                         The paper likely uses False (ImpalaCNN output only).
+                          If False, uses model.enc() [256-dim for PPO, the ImpalaCNN output].
+                          The paper likely uses False (ImpalaCNN output only).
+        use_pre_relu: If True and use_full_encoder is False, extracts the pre-ReLU
+                      features from the ImpalaCNN's final dense layer.
     """
     model.eval()
     latent_vectors = []
     with th.no_grad():
         for observations_batch in data_loader:
             observations_batch = observations_batch[0].to(device)
-            
+
             if use_full_encoder:
                 # Full encoder: CNN + dense(256) + linear(1024)
+                # Note: Pre-ReLU for this path is more complex, involving model.linear
                 latents = model.encode(observations_batch)
+                if use_pre_relu:
+                     print("Warning: use_pre_relu with use_full_encoder=True not implemented easily, returning post-ReLU 1024-dim vector.")
+
             else:
-                # ImpalaCNN only: CNN + dense(256)
-                # This is likely what the paper uses when referring to "encoder"
-                latents = model.enc(observations_batch)
+                # ImpalaCNN only path
+                if use_pre_relu:
+                    # --- START MODIFICATION ---
+                    # Manually compute pre-ReLU features from ImpalaCNN's dense layer
+                    x = observations_batch
+                    # Pass through convolutional stacks
+                    for stack in model.enc.stacks:
+                        x = stack(x)
+                    # Flatten
+                    x = x.reshape(x.size(0), -1)
+                    # Apply ONLY the linear part of the final dense layer
+                    # Assumes the dense layer module has an attribute '.layer' holding the nn.Linear
+                    # If your model structure is different, you might need to adjust this line.
+                    latents = model.enc.dense.layer(x)
+                    # --- END MODIFICATION ---
+                else:
+                    # Default: Get post-ReLU features by calling the module directly
+                    latents = model.enc(observations_batch) # This implicitly includes the ReLU
 
             if isinstance(latents, (tuple, list)):
                 latents = latents[0]
             assert latents.ndim == 2, f"Unexpected latent shape {latents.shape}"
             latent_vectors.append(latents.cpu())
-    
+
     return th.cat(latent_vectors, dim=0)
 
 # --- Part 5: Train and Evaluate Classifier ---
@@ -642,6 +663,7 @@ if __name__ == "__main__":
     
     # Representation extraction arguments
     parser.add_argument("--use_full_encoder", action="store_true", help="If set, extract from full encoder (1024-dim). Otherwise, extract from ImpalaCNN only (256-dim). Paper likely uses ImpalaCNN only.")
+    parser.add_argument("--use_pre_relu", action="store_true", help="If set and --use_full_encoder is NOT set, extract pre-ReLU features from ImpalaCNN.")
     
     args = parser.parse_args()
 
@@ -741,9 +763,9 @@ if __name__ == "__main__":
         test_obs_loader = DataLoader(test_obs_dataset, batch_size=256)
 
         print(f"Extracting latents for training set (use_full_encoder={args.use_full_encoder})...")
-        X_train_latents = extract_latent_vectors(analysis_model, train_obs_loader, device, use_full_encoder=args.use_full_encoder)
+        X_train_latents = extract_latent_vectors(analysis_model, train_obs_loader, device, use_full_encoder=args.use_full_encoder, use_pre_relu=args.use_pre_relu)
         print(f"Extracting latents for testing set (use_full_encoder={args.use_full_encoder})...")
-        X_test_latents = extract_latent_vectors(analysis_model, test_obs_loader, device, use_full_encoder=args.use_full_encoder)
+        X_test_latents = extract_latent_vectors(analysis_model, test_obs_loader, device, use_full_encoder=args.use_full_encoder, use_pre_relu=args.use_pre_relu)
 
         print(f"Latent vector shapes:")
         print(f"  - Training latents: {X_train_latents.shape}")
@@ -791,4 +813,4 @@ if __name__ == "__main__":
         if confidences:
             plot_confidence_density(confidences)
     
-    print("\nScript finished.")
+   print("\nScript finished.")
