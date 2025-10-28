@@ -596,28 +596,44 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
 
 
 # --- Part 6: Visualize Confidence ---
-def plot_confidence_density(confidences, label="PPO", color="red", save_path=None):
+def plot_confidence_distribution(conf_dict, save_path="confidence_comparison.png"):
+    """
+    conf_dict: {"PPO": np.ndarray, "Ours": np.ndarray}
+    """
+
     plt.figure(figsize=(4, 3))
-    plt.hist(
-        confidences,
-        bins=20,
-        range=(0, 1),
-        density=True,
-        alpha=0.3,
-        color=color,
-        edgecolor=color,
-        linewidth=1.0,
-        label=label,
-    )
-    plt.xlabel("Confidence")
-    plt.ylabel("Density")
+
+    # 20 bins from 0–1
+    bins = np.linspace(0, 1, 21)
+
+    for label, confs in conf_dict.items():
+        color = "red" if label.lower() == "ppo" else "blue"
+        alpha = 0.25 if label.lower() == "ppo" else 0.35
+
+        # --- normalization style to match paper ---
+        # Convert counts to probabilities, not area densities
+        counts, _ = np.histogram(confs, bins=bins)
+        probs = counts / counts.sum()  # normalize total area = 1
+        plt.bar(
+            bins[:-1],
+            probs,
+            width=np.diff(bins),
+            align="edge",
+            color=color,
+            alpha=alpha,
+            edgecolor=color,
+            linewidth=1.0,
+            label=label,
+        )
+
+    plt.xlabel("Confidence", fontsize=10)
+    plt.ylabel("Density", fontsize=10)
     plt.xlim(0, 1)
-    plt.legend(frameon=False)
+    plt.ylim(0, 0.25)   # adjust to match figure scale
+    plt.legend(frameon=False, fontsize=9)
     plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300)
-    else:
-        plt.show()
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    print(f"Saved to {save_path}")
 
 
 def load_analysis_model(exp_name, timestamp, train_seed, ckpt_epoch, device):
