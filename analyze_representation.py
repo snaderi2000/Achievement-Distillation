@@ -6,6 +6,7 @@ import yaml
 from functools import partial
 
 import numpy as np
+import pandas as pd
 import torch as th
 import torch.nn as nn
 import torch.optim as optim
@@ -405,12 +406,15 @@ def extract_latent_vectors(model, data_loader, device):
         for observations_batch in data_loader:
             observations_batch = observations_batch[0].to(device)
             latents = model.encode(observations_batch)
+            if isinstance(latents, (tuple, list)):
+                latents = latents[0]
+            assert latents.ndim == 2, f"Unexpected latent shape {latents.shape}"
             latent_vectors.append(latents.cpu())
     
     return th.cat(latent_vectors, dim=0)
 
 # --- Part 5: Train and Evaluate Classifier ---
-def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_test, num_classes, device, exp_name):
+def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_test, num_classes, device, exp_name, num_epochs=500, random_state=42):
     """Trains and evaluates a linear classifier on the latent vectors."""
     print("\n--- Part 5: Training and Evaluating Classifier ---")
     
@@ -422,13 +426,14 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
     criterion = nn.CrossEntropyLoss()
     
     train_dataset = TensorDataset(X_train_latents, y_train)
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    g = th.Generator()
+    g.manual_seed(random_state)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, generator=g)
     
     test_dataset = TensorDataset(X_test_latents, y_test)
     test_loader = DataLoader(test_dataset, batch_size=256)
     
     # --- Training Loop ---
-    num_epochs = 500 # Changed from 25 to 500 to match paper
     print(f"Training classifier for {num_epochs} epochs...")
     for epoch in range(num_epochs):
         classifier.train()
@@ -487,6 +492,13 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
     cm = confusion_matrix(all_labels, all_preds)
     print("Columns: Predicted, Rows: Actual")
     print(cm)
+
+    # Per-class confidence check
+    df = pd.DataFrame({"label": all_labels, "conf": all_confidences})
+    mean_conf = df.groupby("label")["conf"].mean()
+    print("\nMean confidence per class:")
+    for i in mean_conf.index:
+        print(f"  {TASKS[i]:20s}: {mean_conf[i]:.3f}")
 
     np.save(f"conf_{exp_name}.npy", np.array(all_confidences))
     print(f"Confidence values saved to: conf_{exp_name}.npy")
@@ -578,6 +590,7 @@ if __name__ == "__main__":
     # General arguments
     parser.add_argument("--eval_seed", type=int, default=123, help="Seed for evaluation env")
     parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to collect")
+    parser.add_argument("--classifier_epochs", type=int, default=500, help="Number of epochs to train the linear classifier.")
 
     # Data handling arguments
     parser.add_argument("--output_dataset_path", type=str, default=None, help="If provided, save the collected and labeled dataset to this path.")
@@ -691,7 +704,7 @@ if __name__ == "__main__":
         # --- Run Part 5: Train and Evaluate Classifier ---
         num_classes = len(TASKS) # 22 achievements
         confidences = train_and_evaluate_classifier(
-            X_train_latents, y_train, X_test_latents, y_test, num_classes, device, args.exp_name
+            X_train_latents, y_train, X_test_latents, y_test, num_classes, device, args.exp_name, num_epochs=args.classifier_epochs, random_state=args.eval_seed
         )
         
         # --- Run Part 6: Visualize Confidence ---
