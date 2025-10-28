@@ -862,5 +862,8 @@ if __name__ == "__main__":
         
         # --- Run Part 6: Visualize Confidence ---
         if confidences:
-            plot_confidence_density(confidences)
+            plot_confidence_density(
+                {args.exp_name: np.array(confidences)},
+                save_path=f"confidence_density_{args.exp_name}.png"
+            )
     
