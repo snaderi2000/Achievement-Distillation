@@ -596,20 +596,28 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
 
 
 # --- Part 6: Visualize Confidence ---
-def plot_confidence_density(confidences, save_path="confidence_density.png"):
-    print(f"\n--- Part 6: Generating Confidence Density Plot ---")
-    plt.figure(figsize=(8, 6))
-
-    # 20 bins, density normalized = matches paper style
-    plt.hist(confidences, bins=20, range=(0,1), density=True, alpha=0.6, color='blue', edgecolor='black')
-
+def plot_confidence_density(confidences, label="PPO", color="red", save_path=None):
+    plt.figure(figsize=(4, 3))
+    plt.hist(
+        confidences,
+        bins=20,
+        range=(0, 1),
+        density=True,
+        alpha=0.3,
+        color=color,
+        edgecolor=color,
+        linewidth=1.0,
+        label=label,
+    )
     plt.xlabel("Confidence")
     plt.ylabel("Density")
-    plt.title("Prediction Confidence Distribution")
     plt.xlim(0, 1)
-    plt.grid(alpha=0.3)
-    plt.savefig(save_path)
-    print(f"Histogram saved to: {save_path}")
+    plt.legend(frameon=False)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300)
+    else:
+        plt.show()
 
 
 def load_analysis_model(exp_name, timestamp, train_seed, ckpt_epoch, device):
