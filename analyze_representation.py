@@ -405,14 +405,9 @@ def extract_latent_vectors(model, data_loader, device):
         for observations_batch in data_loader:
             observations_batch = observations_batch[0].to(device)
             
-            # Manually step through the ImpalaCNN encoder to get the pre-ReLU features
-            # from the final dense layer. This is the true pre-activation latent space.
-            x = observations_batch
-            for stack in model.enc.stacks:
-                x = stack(x)
-            x = x.reshape(x.size(0), -1)
-            # Access the internal .layer of the final FanInInitReLULayer and apply ReLU
-            latents = F.relu(model.enc.dense.layer(x))
+            # Use the full encoder output (model.encode), which includes the second dense layer.
+            # This corresponds to the final latent representation before the policy/value heads.
+            latents = model.encode(observations_batch)
 
             if isinstance(latents, (tuple, list)):
                 latents = latents[0]
