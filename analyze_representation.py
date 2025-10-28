@@ -27,8 +27,50 @@ from achievement_distillation.model import * # Import necessary model classes
 from achievement_distillation.wrapper import VecPyTorch
 from achievement_distillation.constant import TASKS
 
+def extract_ach_vec_from_infos(infos, TASKS):
+    # Supports: (a) list[dict] from VecEnv, (b) dict of tensors,
+    # (c) achievements as dict of {name: int} or np array/tensor.
+    if isinstance(infos, (list, tuple)):
+        info0 = infos[0] if len(infos) > 0 else {}
+    elif isinstance(infos, dict):
+        # VecPyTorch can collate infos into dict of tensors
+        if 'achievements' in infos:
+            ach = infos['achievements']
+            # ach could be tensor[N,22] or list/array; take first env
+            if hasattr(ach, 'shape'):
+                a0 = ach[0]
+                return a0.detach().cpu().numpy() if hasattr(a0, 'detach') else np.asarray(a0)
+            elif isinstance(ach, (list, tuple)):
+                return np.asarray(ach[0])
+        info0 = {k: (v[0] if isinstance(v, (list, tuple)) else v) for k, v in infos.items()}
+    else:
+        info0 = {}
+
+    ach = info0.get('achievements', None)
+    if ach is None:
+        return None
+    # If it's already a vector
+    if isinstance(ach, (np.ndarray, list)) and (len(ach) == len(TASKS)):
+        return np.asarray(ach, dtype=int)
+
+    # If it's a dict of {task_name: 0/1}
+    if isinstance(ach, dict):
+        vec = np.zeros(len(TASKS), dtype=int)
+        for i, t in enumerate(TASKS):
+            vec[i] = int(bool(ach.get(t, 0)))
+        return vec
+
+    # If it's a tensor
+    if hasattr(ach, 'shape'):
+        arr = ach.detach().cpu().numpy() if hasattr(ach, 'detach') else np.asarray(ach)
+        if arr.ndim == 1 and arr.shape[0] == len(TASKS):
+            return arr.astype(int)
+        if arr.ndim == 2:
+            return arr[0].astype(int)
+    return None
+
 # --- Part 1: Data Collection Function ---
-def collect_data(args, device, use_expert=False):
+def collect_data(args, device, use_expert=False, model_config=None):
     """Loads a specified model and collects episode data."""
 
     if use_expert:
@@ -112,8 +154,17 @@ def collect_data(args, device, use_expert=False):
 
     print(f"Starting data collection for {args.num_episodes} episodes...")
     for i in range(args.num_episodes):
+        try:
+            venv.env_method('seed', args.eval_seed + i)
+        except Exception:
+            pass
         obs = venv.reset()
-        states = th.zeros(1, hidsize).to(device)
+        
+        # Robustly handle recurrent states
+        states = None
+        if getattr(model, "use_memory", False): # Check if model is recurrent
+            hidsize = config.get("model_kwargs", {}).get("hidsize", 512)
+            states = th.zeros(1, hidsize, device=device)
 
         episode_obs = []
         episode_rewards = []
@@ -124,31 +175,31 @@ def collect_data(args, device, use_expert=False):
         step_count = 0
         while not done:
             with th.no_grad():
-                outputs = model.act(obs, states=states)
+                outputs = model.act(obs, states=states) if states is not None else model.act(obs)
                 actions = outputs["actions"]
-                if "next_states" in outputs:
+                if states is not None and "next_states" in outputs:
                      states = outputs["next_states"]
 
-            episode_obs.append(obs.squeeze(0).cpu())
+            # Store observation as float32, but do not normalize here. The model's encoder handles it.
+            episode_obs.append(obs.squeeze(0).cpu().to(dtype=th.float32))
             next_obs, rewards, dones, infos = venv.step(actions)
+
+            # Robust achievement extraction
+            ach_vec = extract_ach_vec_from_infos(infos, TASKS)
+            if ach_vec is None:
+                # Fallback if achievements are missing entirely for a step
+                ach_vec = np.zeros(len(TASKS), dtype=int)
+            episode_achievements.append(ach_vec)
 
             episode_rewards.append(rewards.item())
             episode_dones.append(dones.item())
-            # Corrected logic for extracting achievements
-            if 'achievements' in infos:
-                 # The wrapper returns a tensor, access the data for the first (and only) env
-                 ach_tensor = infos['achievements'][0].cpu().numpy()
-                 episode_achievements.append(ach_tensor.copy())
-            else:
-                 # Ensure a placeholder of the correct shape if achievements are missing
-                 episode_achievements.append(np.zeros(len(TASKS), dtype=int))
 
             obs = next_obs
             done = dones.item()
             step_count += 1
 
         if episode_obs:
-            final_obs = obs.squeeze(0).cpu()
+            final_obs = obs.squeeze(0).cpu().to(dtype=th.float32)
             episode_obs.append(final_obs)
 
             # Ensure achievements array has the correct length if episode ended early
@@ -235,7 +286,7 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
         if episode_len == 0:
             continue
 
-        goal_steps_dict = {} # Map step_index -> achievement_index
+        goal_steps_dict = {} # step -> list of ach_idx
 
         # Pad achievements_over_time with initial state (all zeros)
         initial_achievements = np.zeros((1, len(TASKS)), dtype=achievements_over_time.dtype)
@@ -251,7 +302,7 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
 
         for step_idx, ach_idx in zip(goal_steps_indices, unlocked_achievement_indices):
             actual_step_of_unlock = step_idx + 1 # Index from 1 to T
-            goal_steps_dict[actual_step_of_unlock] = ach_idx
+            goal_steps_dict.setdefault(actual_step_of_unlock, []).append(int(ach_idx))
 
         sorted_goal_steps = sorted(goal_steps_dict.keys())
 
@@ -259,13 +310,12 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
         for t in range(episode_len + 1):
             next_achievement_label = -1 # Default: No future achievement
 
-            found_next = False
             for goal_step in sorted_goal_steps:
                 # Goal step is index 1 to T, representing unlock *after* step t-1
                 # We need goal_step > t (current state index 0 to T)
                 if goal_step > t:
-                    next_achievement_label = goal_steps_dict[goal_step]
-                    found_next = True
+                    # pick the first achievement (lowest idx) at that earliest goal_step
+                    next_achievement_label = sorted(goal_steps_dict[goal_step])[0]
                     break
 
             labeled_data.append((observations[t], next_achievement_label))
@@ -327,20 +377,31 @@ def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, ra
             test_size=0.2, random_state=random_state, stratify=labels_tensor
         )
     else:
-        # Subsample the data as per the paper's methodology
+        # Subsample the data and perform a stratified split
         random.seed(random_state)
         random.shuffle(filtered_data)
         
-        train_samples = filtered_data[:train_size]
-        test_samples = filtered_data[train_size : train_size + test_size]
-        
-        X_train_list, y_train_list = zip(*train_samples)
-        X_test_list, y_test_list = zip(*test_samples)
+        # Ensure we have enough data for the full split
+        total_required = train_size + test_size
+        if len(filtered_data) < total_required:
+            print(f"Error: Not enough filtered data ({len(filtered_data)}) for a {train_size}/{test_size} split.")
+            return None, None, None, None
 
-        X_train = th.stack(X_train_list)
-        y_train = th.tensor(y_train_list, dtype=th.long)
-        X_test = th.stack(X_test_list)
-        y_test = th.tensor(y_test_list, dtype=th.long)
+        sub_samples = filtered_data[:total_required]
+        
+        X_list, y_list = zip(*sub_samples)
+
+        X_full = th.stack(X_list)
+        y_full = th.tensor(y_list, dtype=th.long)
+
+        # Stratified split on the subsampled data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_full, y_full,
+            train_size=train_size,
+            test_size=test_size,
+            random_state=random_state,
+            stratify=y_full
+        )
 
     print(f"Data split into training and testing sets:")
     print(f"  - Training set size: {len(X_train)}")
@@ -368,8 +429,15 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
     
     # --- Setup ---
     input_dim = X_train_latents.shape[1]
+
+    # Standardize features
+    mu = X_train_latents.mean(dim=0, keepdim=True)
+    sigma = X_train_latents.std(dim=0, keepdim=True).clamp_min(1e-6)
+    X_train_latents = (X_train_latents - mu) / sigma
+    X_test_latents  = (X_test_latents  - mu) / sigma
+
     classifier = nn.Linear(input_dim, num_classes).to(device)
-    optimizer = optim.Adam(classifier.parameters(), lr=1e-3)
+    optimizer = optim.Adam(classifier.parameters(), lr=1e-3, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
     
     train_dataset = TensorDataset(X_train_latents, y_train)
@@ -568,7 +636,17 @@ if __name__ == "__main__":
                 print("Error: If --expert_exp_name is used, you must provide --expert_timestamp and --expert_train_seed.")
                 sys.exit(1)
         
-        collected_episodes = collect_data(args, device, use_expert=use_expert)
+        # Determine the config for the data collection model
+        collection_exp_name = args.expert_exp_name if use_expert else args.exp_name
+        config_path = f"configs/{collection_exp_name}.yaml"
+        try:
+            with open(config_path, "r") as f:
+                collection_config = yaml.load(f, Loader=yaml.FullLoader)
+        except FileNotFoundError:
+            print(f"Error: Config file for data collection model not found at {config_path}")
+            sys.exit(1)
+
+        collected_episodes = collect_data(args, device, use_expert=use_expert, model_config=collection_config)
 
         # --- Run Part 2: Labeling States ---
         labeled_state_data = label_states_with_next_achievement(collected_episodes)
