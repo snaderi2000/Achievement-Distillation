@@ -668,6 +668,16 @@ if __name__ == "__main__":
         args.exp_name, args.timestamp, args.train_seed, args.ckpt_epoch, device
     )
 
+    # --- Diagnostic: Print Encoder Architecture ---
+    print("\n--- Encoder Architecture ---")
+    print(analysis_model.enc)
+
+    print("\n--- Encoder Modules ---")
+    for name, module in analysis_model.enc.named_modules():
+        if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+            print(f"{name:40s} | weight {tuple(module.weight.shape)} | bias {module.bias is not None}")
+
+
     # Freeze encoder (IMPORTANT)
     analysis_model.eval()
     for name, param in analysis_model.named_parameters():
@@ -710,14 +720,22 @@ if __name__ == "__main__":
         print(f"  - Training latents: {X_train_latents.shape}")
         print(f"  - Testing latents:  {X_test_latents.shape}")
 
-        # Diagnostic: Check latent vector statistics
+        # Diagnostic: Check latent vector statistics pre- and post-ReLU
         with th.no_grad():
-            sample_latents = X_train_latents[:32] # Use a small batch
+            sample_batch = X_train[:32] # Use a small batch of observations
+            x = sample_batch.to(device)
+            for stack in analysis_model.enc.stacks:
+                x = stack(x)
+            x = x.reshape(x.size(0), -1)
+            pre_relu = analysis_model.enc.dense.layer(x)
+            post_relu = F.relu(pre_relu)
+
+            neg_frac = (pre_relu < 0).float().mean().item()
+            zero_frac = (post_relu == 0).float().mean().item()
             print(f"\n--- Latent Vector Sanity Check ---")
-            print(f"  - Mean: {sample_latents.mean().item():.4f}")
-            print(f"  - Std Dev: {sample_latents.std().item():.4f}")
-            print(f"  - Fraction of negative entries: {(X_train_latents < 0).float().mean().item():.3f}")
-            print(f"  - Max abs latent value: {X_train_latents.abs().max().item():.2f}")
+            print(f"Fraction negative before ReLU: {neg_frac:.3f}")
+            print(f"Fraction zero after ReLU: {zero_frac:.3f}")
+            print(f"Mean pre-ReLU: {pre_relu.mean():.3f}, std: {pre_relu.std():.3f}")
 
         # --- Run Part 5: Train and Evaluate Classifier ---
         num_classes = len(TASKS) # 22 achievements
