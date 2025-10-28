@@ -345,7 +345,7 @@ def label_states_with_next_achievement(all_episodes: list) -> list:
 
 
 # --- Part 3: Create Train/Test Splits ---
-def create_train_test_splits(labeled_data, train_size=100000, test_size=20000, random_state=22):
+def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, random_state=22):
     """Subsamples the labeled data into fixed-size training and testing sets."""
     print("\n--- Part 3: Creating Train/Test Splits ---")
 
