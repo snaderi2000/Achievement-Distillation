@@ -598,29 +598,47 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
 # --- Part 6: Visualize Confidence ---
 def plot_confidence_density(conf_dict, save_path="confidence_comparison.png"):
     """
-    conf_dict: {"PPO": np.ndarray, "Ours": np.ndarray}
+    Plots confidence distributions for one or more models to match the paper's style.
+    conf_dict: e.g. {"PPO": np.ndarray, "PPO+AD": np.ndarray}
     """
-
+    plt.style.use("seaborn-v0_8-whitegrid")
+    plt.rcParams.update({
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.linewidth": 0.8,
+        "axes.labelsize": 10,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+    })
     plt.figure(figsize=(4, 3))
 
-    # 20 bins from 0–1
-    bins = np.linspace(0, 1, 21)
+    # 25 bins from 0–1, to match the paper's figure.
+    bins = np.linspace(0, 1, 26)
+    width = (bins[1] - bins[0]) * 0.9  # Create a slight gap between bars.
 
     for label, confs in conf_dict.items():
-        color = "red" if label.lower() == "ppo" else "blue"
-        alpha = 0.25 if label.lower() == "ppo" else 0.35
+        # Heuristic for colors to match paper (PPO=red, Ours=blue)
+        if "ppo" in label.lower() and "ad" not in label.lower():
+            color = "lightcoral"
+            alpha = 0.25
+        else:
+            color = "royalblue"
+            alpha = 0.35
 
-        # --- normalization style to match paper ---
-        # Convert counts to probabilities, not area densities
+        # Normalize by total count to get probability densities.
         counts, _ = np.histogram(confs, bins=bins)
-        probs = counts / counts.sum()  # normalize total area = 1
+        if counts.sum() == 0:
+            print(f"Warning: No data to plot for label '{label}'")
+            continue
+        probs = counts / counts.sum()
+
         plt.bar(
             bins[:-1],
             probs,
-            width=np.diff(bins),
+            width=width,
             align="edge",
-            color=color,
             alpha=alpha,
+            color=color,
             edgecolor=color,
             linewidth=1.0,
             label=label,
@@ -629,8 +647,8 @@ def plot_confidence_density(conf_dict, save_path="confidence_comparison.png"):
     plt.xlabel("Confidence", fontsize=10)
     plt.ylabel("Density", fontsize=10)
     plt.xlim(0, 1)
-    plt.ylim(0, 0.25)   # adjust to match figure scale
-    plt.legend(frameon=False, fontsize=9)
+    plt.ylim(0, 0.25)
+    plt.legend(frameon=True, fontsize=9)
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     print(f"Saved to {save_path}")
