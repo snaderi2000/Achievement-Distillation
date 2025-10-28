@@ -405,7 +405,8 @@ def extract_latent_vectors(model, data_loader, device):
     with th.no_grad():
         for observations_batch in data_loader:
             observations_batch = observations_batch[0].to(device)
-            latents = model.encode(observations_batch)
+            # Use model.enc to get pre-activation features, bypassing the final ReLU in model.encode
+            latents = model.enc(observations_batch)
             if isinstance(latents, (tuple, list)):
                 latents = latents[0]
             assert latents.ndim == 2, f"Unexpected latent shape {latents.shape}"
@@ -703,12 +704,19 @@ if __name__ == "__main__":
 
         # Diagnostic: Check latent vector statistics
         with th.no_grad():
-            sample_latents = X_train_latents[:32] # Use a small batch
-            print(f"\n--- Latent Vector Sanity Check ---")
-            print(f"  - Mean: {sample_latents.mean().item():.4f}")
-            print(f"  - Std Dev: {sample_latents.std().item():.4f}")
-            print(f"  - Fraction of negative entries: {(X_train_latents < 0).float().mean().item():.3f}")
-            print(f"  - Max abs latent value: {X_train_latents.abs().max().item():.2f}")
+            batch = X_train[:32].to(device)
+            z_encode = analysis_model.encode(batch)
+            print("\n--- Latent Vector Sanity Check ---")
+            print("encode() output: mean", z_encode.mean().item(),
+                  "std", z_encode.std().item(),
+                  "neg fraction", (z_encode < 0).float().mean().item())
+            
+            # Try raw encoder output if accessible
+            if hasattr(analysis_model, "enc"):
+                z_raw = analysis_model.enc(batch)
+                print("enc() output: mean", z_raw.mean().item(),
+                      "std", z_raw.std().item(),
+                      "neg fraction", (z_raw < 0).float().mean().item())
 
         # --- Run Part 5: Train and Evaluate Classifier ---
         num_classes = len(TASKS) # 22 achievements
