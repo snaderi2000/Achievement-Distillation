@@ -513,32 +513,82 @@ if __name__ == "__main__":
     # General arguments
     parser.add_argument("--eval_seed", type=int, default=123, help="Seed for evaluation env")
     parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to collect")
+    parser.add_argument("--classifier_epochs", type=int, default=500, help="Number of epochs to train the linear classifier.")
+    parser.add_argument("--split_seed", type=int, default=22, help="Seed for train/test split.")
+    parser.add_argument("--classifier_seed", type=int, default=420, help="Seed for classifier training.")
+    parser.add_argument("--health_lookahead", type=int, default=5, help="Lookahead horizon for health labeling.")
+
+    # Data handling arguments
+    parser.add_argument("--output_dataset_path", type=str, default=None, help="If provided, save the collected and labeled dataset to this path.")
+    parser.add_argument("--load_dataset_path", type=str, default=None, help="If provided, load a pre-existing labeled dataset from this path, skipping collection.")
+    parser.add_argument("--train_size", type=int, default=50000, help="Size of the training set.")
+    parser.add_argument("--test_size", type=int, default=10000, help="Size of the test set.")
+    
+    # Representation extraction arguments
+    parser.add_argument("--use_full_encoder", action="store_true", help="If set, extract from full encoder (1024-dim). Otherwise, extract from ImpalaCNN only (256-dim).")
+    parser.add_argument("--use_pre_relu", action="store_true", help="If set and --use_full_encoder is NOT set, extract pre-ReLU features from ImpalaCNN.")
+    
     args = parser.parse_args()
 
-    # --- Run Part 1: Data Collection ---
-    use_expert = bool(args.expert_exp_name)
-    if use_expert:
-        # Ensure all expert args are provided if expert_exp_name is set
-        if not all([args.expert_timestamp, args.expert_train_seed is not None]):
-            print("Error: If --expert_exp_name is used, you must provide --expert_timestamp and --expert_train_seed.")
-            sys.exit(1)
-    
-    # Determine device
+    # --- Argument Validation ---
+    if args.output_dataset_path and args.load_dataset_path:
+        print("Error: Cannot use --output_dataset_path and --load_dataset_path simultaneously.")
+        sys.exit(1)
+
+    # --- Global Setup ---
     cuda = th.cuda.is_available()
     device = th.device("cuda:0" if cuda else "cpu")
+    print(f"--- Global Setup ---")
+    print(f"Using device: {device}")
 
-    collected_episodes = collect_data(args, device, use_expert=use_expert)
 
+    # --- Part A: Data Generation or Loading ---
+    if args.load_dataset_path:
+        print(f"\n--- Loading Dataset from {args.load_dataset_path} ---")
+        if not os.path.exists(args.load_dataset_path):
+            print(f"Error: Dataset file not found at {args.load_dataset_path}")
+            sys.exit(1)
+        try:
+            labeled_state_data = th.load(args.load_dataset_path)
+            print("Dataset loaded successfully.")
+        except Exception as e:
+            print(f"Error loading dataset: {e}")
+            sys.exit(1)
+    else:
+        # --- Run Part 1: Data Collection ---
+        use_expert = bool(args.expert_exp_name)
+        if use_expert:
+            # Ensure all expert args are provided if expert_exp_name is set
+            if not all([args.expert_timestamp, args.expert_train_seed is not None]):
+                print("Error: If --expert_exp_name is used, you must provide --expert_timestamp and --expert_train_seed.")
+                sys.exit(1)
+        
+        collected_episodes = collect_data(args, device, use_expert=use_expert)
+
+        # --- Run Part 2: Labeling States ---
+        labeled_state_data = label_states_by_health_change(collected_episodes, lookahead_horizon=args.health_lookahead)
+
+        if args.output_dataset_path:
+            print(f"\n--- Saving Labeled Dataset to {args.output_dataset_path} ---")
+            try:
+                th.save(labeled_state_data, args.output_dataset_path)
+                print("Dataset saved successfully.")
+            except Exception as e:
+                print(f"Error saving dataset: {e}")
+
+    # --- Part B: Analysis (applies to both generated and loaded data) ---
     # --- Load the ANALYSIS Model ---
     analysis_model = load_analysis_model(
         args.exp_name, args.timestamp, args.train_seed, args.ckpt_epoch, device
     )
 
-    # --- Run Part 2: Labeling States ---
-    labeled_state_data = label_states_by_health_change(collected_episodes)
-
     # --- Run Part 3: Create Train/Test Splits ---
-    X_train, X_test, y_train, y_test = create_train_test_splits(labeled_state_data)
+    X_train, X_test, y_train, y_test = create_train_test_splits(
+        labeled_state_data,
+        train_size=args.train_size,
+        test_size=args.test_size,
+        random_state=args.split_seed,
+    )
     
     if X_train is not None:
         # --- Run Part 4: Extract Latent Representations ---
@@ -550,10 +600,10 @@ if __name__ == "__main__":
         test_obs_dataset = TensorDataset(X_test)
         test_obs_loader = DataLoader(test_obs_dataset, batch_size=256)
 
-        print("Extracting latents for training set...")
-        X_train_latents = extract_latent_vectors(analysis_model, train_obs_loader, device)
-        print("Extracting latents for testing set...")
-        X_test_latents = extract_latent_vectors(analysis_model, test_obs_loader, device)
+        print(f"Extracting latents for training set (use_full_encoder={args.use_full_encoder}, use_pre_relu={args.use_pre_relu})...")
+        X_train_latents = extract_latent_vectors(analysis_model, train_obs_loader, device, use_full_encoder=args.use_full_encoder, use_pre_relu=args.use_pre_relu)
+        print(f"Extracting latents for testing set (use_full_encoder={args.use_full_encoder}, use_pre_relu={args.use_pre_relu})...")
+        X_test_latents = extract_latent_vectors(analysis_model, test_obs_loader, device, use_full_encoder=args.use_full_encoder, use_pre_relu=args.use_pre_relu)
 
         print(f"Latent vector shapes:")
         print(f"  - Training latents: {X_train_latents.shape}")
@@ -562,7 +612,9 @@ if __name__ == "__main__":
         # --- Run Part 5: Train and Evaluate Classifier ---
         num_classes = 2 # No-Decrease vs Decrease
         train_and_evaluate_classifier(
-            X_train_latents, y_train, X_test_latents, y_test, num_classes, device
+            X_train_latents, y_train, X_test_latents, y_test, num_classes, device,
+            num_epochs=args.classifier_epochs,
+            random_state=args.classifier_seed,
         )
     
     print("\nScript finished.")
