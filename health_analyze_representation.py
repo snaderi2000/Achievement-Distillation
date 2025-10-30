@@ -16,6 +16,7 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import seaborn as sns
 from collections import Counter
+from sklearn.manifold import TSNE
 
 # Assuming your environment setup and imports are correct for Crafter and Stable Baselines
 from crafter.env import Env
@@ -446,6 +447,72 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
     print(cm)
 
 
+def visualize_tsne(latent_vectors, labels, exp_name, random_state=42):
+    """
+    Performs t-SNE on a subsample of latent vectors and plots the 2D embedding.
+    """
+    print("\n--- Part 6: Visualizing Latent Representations with t-SNE ---")
+
+    # --- Subsample the data for efficiency ---
+    # t-SNE can be slow; using a subset is often sufficient for visualization.
+    num_samples = min(2000, len(latent_vectors))
+    print(f"Running t-SNE on a random subsample of {num_samples} data points...")
+    
+    # Use stratification to maintain label proportions in the subsample
+    indices = np.arange(len(latent_vectors))
+    _, subsample_indices = train_test_split(
+        indices,
+        test_size=num_samples / len(indices),
+        stratify=labels.cpu().numpy(),
+        random_state=random_state
+    )
+    
+    sub_latents = latent_vectors[subsample_indices]
+    sub_labels = labels[subsample_indices]
+
+    # --- Run t-SNE ---
+    tsne = TSNE(
+        n_components=2,
+        perplexity=30,      # A common starting point for perplexity
+        n_iter=1000,
+        random_state=random_state,
+        init='pca',
+        learning_rate='auto'
+    )
+    tsne_results = tsne.fit_transform(sub_latents.cpu().numpy())
+    print("t-SNE fitting complete.")
+
+    # --- Plot the results ---
+    plt.style.use("seaborn-v0_8-whitegrid")
+    plt.figure(figsize=(8, 6))
+    
+    # Define colors: blue for "No Decrease", red for "Decrease"
+    colors = {0: 'royalblue', 1: 'coral'}
+    label_names = {0: 'Safe (No Health Decrease)', 1: 'Danger (Health Decrease)'}
+
+    for label_val, color in colors.items():
+        mask = sub_labels.cpu().numpy() == label_val
+        plt.scatter(
+            tsne_results[mask, 0],
+            tsne_results[mask, 1],
+            c=color,
+            label=label_names[label_val],
+            alpha=0.6,
+            edgecolors='w',
+            s=50
+        )
+    
+    plt.title(f"t-SNE Visualization of Latent States ({exp_name})")
+    plt.xlabel("t-SNE Component 1")
+    plt.ylabel("t-SNE Component 2")
+    plt.legend()
+    plt.grid(True)
+    
+    save_path = f"tsne_health_{exp_name}.png"
+    plt.savefig(save_path, dpi=300)
+    print(f"t-SNE plot saved to: {save_path}")
+
+
 def load_analysis_model(exp_name, timestamp, train_seed, ckpt_epoch, device):
     """Loads the model whose representations will be analyzed."""
     print("\n--- Loading ANALYSIS Model for Representation Extraction ---")
@@ -527,6 +594,7 @@ if __name__ == "__main__":
     # Representation extraction arguments
     parser.add_argument("--use_full_encoder", action="store_true", help="If set, extract from full encoder (1024-dim). Otherwise, extract from ImpalaCNN only (256-dim).")
     parser.add_argument("--use_pre_relu", action="store_true", help="If set and --use_full_encoder is NOT set, extract pre-ReLU features from ImpalaCNN.")
+    parser.add_argument("--visualize_tsne", action="store_true", help="If set, generate a t-SNE plot of the latent representations.")
     
     args = parser.parse_args()
 
@@ -616,5 +684,10 @@ if __name__ == "__main__":
             num_epochs=args.classifier_epochs,
             random_state=args.classifier_seed,
         )
+
+        # --- Run Part 6: Visualize t-SNE ---
+        if args.visualize_tsne:
+            # We use the test set for visualization to see how the model generalizes
+            visualize_tsne(X_test_latents, y_test, args.exp_name, random_state=args.split_seed)
     
     print("\nScript finished.")
