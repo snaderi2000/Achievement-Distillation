@@ -28,7 +28,7 @@ from achievement_distillation.wrapper import VecPyTorch
 from achievement_distillation.constant import TASKS
 
 # --- Part 1: Data Collection Function ---
-def collect_data(args, use_expert=False):
+def collect_data(args, device, use_expert=False):
     """Loads a specified model and collects episode data."""
 
     if use_expert:
@@ -63,8 +63,6 @@ def collect_data(args, use_expert=False):
     print(f"Set random seed for evaluation run: {args.eval_seed}")
 
     th.set_num_threads(1)
-    cuda = th.cuda.is_available()
-    device = th.device("cuda:0" if cuda else "cpu")
     print(f"Using device: {device}")
 
     # --- Load Your PPO Model ---
@@ -217,7 +215,7 @@ def collect_data(args, use_expert=False):
     else:
         print(f"\nSUCCESS: A total of {total_achievements_unlocked} achievements were unlocked across all episodes.")
 
-    return all_episodes, device
+    return all_episodes
 
 # --- Part 2: State Labeling Function ---
 def label_states_by_health_change(all_episodes: list, lookahead_horizon: int = 5) -> list:
@@ -327,20 +325,46 @@ def create_train_test_splits(labeled_data, train_size=50000, test_size=10000, ra
     return X_train, X_test, y_train, y_test
 
 # --- Part 4: Extract Latent Representations ---
-def extract_latent_vectors(model, data_loader, device):
+def extract_latent_vectors(model, data_loader, device, use_full_encoder=False, use_pre_relu=False):
     """Extracts latent vectors from the model's encoder for a given dataset."""
     model.eval()
     latent_vectors = []
     with th.no_grad():
         for observations_batch in data_loader:
             observations_batch = observations_batch[0].to(device)
-            latents = model.encode(observations_batch)
+            if observations_batch.max() > 1.0:
+                observations_batch = observations_batch / 255.0
+
+            if use_full_encoder:
+                # Full encoder: CNN + dense(256) + linear(1024)
+                latents = model.encode(observations_batch)
+                if use_pre_relu:
+                     print("Warning: use_pre_relu with use_full_encoder=True not implemented easily, returning post-ReLU 1024-dim vector.")
+            else:
+                # ImpalaCNN only path
+                if use_pre_relu:
+                    # Manually compute pre-ReLU features from ImpalaCNN's dense layer
+                    x = observations_batch
+                    # Pass through convolutional stacks
+                    for stack in model.enc.stacks:
+                        x = stack(x)
+                    # Flatten
+                    x = x.reshape(x.size(0), -1)
+                    # Apply ONLY the linear part of the final dense layer
+                    latents = model.enc.dense.layer(x)
+                else:
+                    # Default: Get post-ReLU features by calling the module directly
+                    latents = model.enc(observations_batch)
+
+            if isinstance(latents, (tuple, list)):
+                latents = latents[0]
+            assert latents.ndim == 2, f"Unexpected latent shape {latents.shape}"
             latent_vectors.append(latents.cpu())
     
     return th.cat(latent_vectors, dim=0)
 
 # --- Part 5: Train and Evaluate Classifier ---
-def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_test, num_classes, device):
+def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_test, num_classes, device, num_epochs=500, random_state=420):
     """Trains and evaluates a linear classifier on the latent vectors."""
     print("\n--- Part 5: Training and Evaluating Classifier ---")
     
@@ -359,13 +383,14 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
     criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
     
     train_dataset = TensorDataset(X_train_latents, y_train)
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    g = th.Generator()
+    g.manual_seed(random_state)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, generator=g)
     
     test_dataset = TensorDataset(X_test_latents, y_test)
     test_loader = DataLoader(test_dataset, batch_size=256)
     
     # --- Training Loop ---
-    num_epochs = 500 # Changed from 25 to 500 to match paper
     print(f"Training classifier for {num_epochs} epochs...")
     for epoch in range(num_epochs):
         classifier.train()
@@ -498,7 +523,11 @@ if __name__ == "__main__":
             print("Error: If --expert_exp_name is used, you must provide --expert_timestamp and --expert_train_seed.")
             sys.exit(1)
     
-    collected_episodes, device = collect_data(args, use_expert=use_expert)
+    # Determine device
+    cuda = th.cuda.is_available()
+    device = th.device("cuda:0" if cuda else "cpu")
+
+    collected_episodes = collect_data(args, device, use_expert=use_expert)
 
     # --- Load the ANALYSIS Model ---
     analysis_model = load_analysis_model(
