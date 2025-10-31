@@ -365,7 +365,7 @@ def extract_latent_vectors(model, data_loader, device, use_full_encoder=False, u
     return th.cat(latent_vectors, dim=0)
 
 # --- Part 5: Train and Evaluate Classifier ---
-def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_test, num_classes, device, num_epochs=500, random_state=420):
+def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_test, num_classes, device, exp_name, num_epochs=500, random_state=420):
     """Trains and evaluates a linear classifier on the latent vectors."""
     print("\n--- Part 5: Training and Evaluating Classifier ---")
     
@@ -705,6 +705,7 @@ if __name__ == "__main__":
         num_classes = 2 # No-Decrease vs Decrease
         train_and_evaluate_classifier(
             X_train_latents, y_train, X_test_latents, y_test, num_classes, device,
+            exp_name=args.exp_name,
             num_epochs=args.classifier_epochs,
             random_state=args.classifier_seed,
         )
