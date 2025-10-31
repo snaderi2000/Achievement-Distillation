@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -416,6 +416,7 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
     all_preds = []
     all_labels = []
     all_confidences = []
+    all_scores = []
     with th.no_grad():
         for latents_batch, labels_batch in test_loader:
             latents_batch, labels_batch = latents_batch.to(device), labels_batch.to(device)
@@ -425,6 +426,9 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
             probs = F.softmax(outputs, dim=1)
             gt_confidences = probs[range(len(labels_batch)), labels_batch].cpu().numpy()
             all_confidences.extend(gt_confidences)
+
+            # For ROC/AUC, we need the raw scores/probabilities for the positive class (label=1)
+            all_scores.extend(probs[:, 1].cpu().numpy())
 
             _, predicted = th.max(outputs.data, 1)
             all_preds.extend(predicted.cpu().numpy())
@@ -445,6 +449,26 @@ def train_and_evaluate_classifier(X_train_latents, y_train, X_test_latents, y_te
     cm = confusion_matrix(all_labels, all_preds)
     print("Columns: Predicted, Rows: Actual")
     print(cm)
+
+    # --- ROC and AUC Calculation ---
+    fpr, tpr, _ = roc_curve(all_labels, all_scores)
+    roc_auc = auc(fpr, tpr)
+    print(f"\n--- ROC / AUC ---")
+    print(f"AUC: {roc_auc:.4f}")
+
+    # --- Plot ROC Curve ---
+    plt.figure(figsize=(6, 5))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(f'Receiver Operating Characteristic ({exp_name})')
+    plt.legend(loc="lower right")
+    roc_save_path = f"roc_curve_{exp_name}.png"
+    plt.savefig(roc_save_path, dpi=300)
+    print(f"ROC curve plot saved to: {roc_save_path}")
 
 
 def visualize_tsne(latent_vectors, labels, exp_name, random_state=42):
