@@ -85,6 +85,11 @@ class VecPyTorch(VecEnvWrapper):
         # Successes
         successes = (achievements > 0).long()
 
+        # Vitals
+        vitals = [[info["inventory"][vital] for vital in ["food", "water", "energy"]] for info in infos]
+        vitals = np.array(vitals)
+        vitals = th.from_numpy(vitals).long().to(self.device)
+
         # Health
         health = [info["inventory"]["health"] for info in infos]
         health = np.array(health)
@@ -96,6 +101,7 @@ class VecPyTorch(VecEnvWrapper):
             "episode_rewards": episode_rewards,
             "achievements": achievements,
             "successes": successes,
+            "vitals": vitals,
             "health": health,
         }
 
