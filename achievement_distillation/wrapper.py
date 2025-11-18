@@ -66,6 +66,7 @@ class VecPyTorch(VecEnvWrapper):
     def transform_infos(
         self, infos: Sequence[Dict[str, np.ndarray]]
     ) -> Dict[str, th.Tensor]:
+        import sys
         # Episode lengths and rewards
         episode_lengths = th.zeros(len(infos)).long().to(self.device)
         episode_rewards = th.zeros(len(infos)).float().to(self.device)
@@ -74,6 +75,9 @@ class VecPyTorch(VecEnvWrapper):
             if "episode" in info:
                 episode_lengths[i] = int(info["episode"]["l"])
                 episode_rewards[i] = float(info["episode"]["r"])
+            if 'inventory' in info:
+                print("Inventory contents:", info['inventory'])
+                sys.exit() # Exit after printing once to avoid flooding logs
 
         # Achievements
         achievements = [
