@@ -146,7 +146,7 @@ class PPOSDAlgorithm(BaseAlgorithm):
 
             # Compute average stats
             if pred_nupdate > 0:
-            pred_loss_epoch /= pred_nupdate
+                pred_loss_epoch /= pred_nupdate
                 pi_dist_epoch /= pred_nupdate
                 vf_dist_epoch /= pred_nupdate
 
