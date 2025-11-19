@@ -73,6 +73,12 @@ def main(args):
 
     # Create storage
     storage_cls = RolloutStorageSD if is_sd else RolloutStorage
+    storage_kwargs = {}
+    if is_sd:
+        storage_kwargs["vital_threshold"] = config["algorithm_kwargs"].get(
+            "vital_threshold", 4
+        )
+
     storage = storage_cls(
         nstep=config["nstep"],
         nproc=config["nproc"],
@@ -80,6 +86,7 @@ def main(args):
         action_space=venv.action_space,
         hidsize=config["model_kwargs"]["hidsize"],
         device=device,
+        **storage_kwargs,
     )
     storage.obs[0].copy_(obs)
 

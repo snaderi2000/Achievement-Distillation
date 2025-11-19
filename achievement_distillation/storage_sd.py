@@ -18,11 +18,13 @@ class RolloutStorage:
         action_space: spaces.Discrete,
         hidsize: int,
         device: th.device,
+        vital_threshold: int = 4,
     ):
         # Params
         self.nstep = nstep
         self.nproc = nproc
         self.device = device
+        self.vital_threshold = vital_threshold
 
         # Get obs shape and action dim
         assert isinstance(observation_space, spaces.Box)
@@ -74,9 +76,17 @@ class RolloutStorage:
         # Update timesteps
         timesteps = prev_timesteps + 1
 
-        # Update states if new achievment is unlocked
-        # For survival distillation, we don't update states based on achievements
-        states = prev_states
+        # Update states if vital restoration occurs while under threshold
+        restoration_conds = (vitals > prev_vitals) & (prev_vitals < self.vital_threshold)
+        restoration_conds = restoration_conds.any(dim=-1, keepdim=True)
+        if restoration_conds.any():
+            with th.no_grad():
+                next_latents = model.encode(obs)
+            states = next_latents - latents
+            states = F.normalize(states, dim=-1)
+            states = th.where(restoration_conds, states, prev_states)
+        else:
+            states = prev_states
 
         # Update vitals, timesteps, and states if done
         done_conds = masks == 0
@@ -124,70 +134,6 @@ class RolloutStorage:
 
         # Compute advantages
         self.advs = (self.advs - self.advs.mean()) / (self.advs.std() + 1e-8)
-
-    def get_goals(self):
-        # Calculate difference in vitals
-        vitals_diff = self.vitals[1:] - self.vitals[:-1]
-
-        # Identify restoration events
-        restoration_events = (vitals_diff > 0) & (self.vitals[:-1] < 4)
-
-        # Get goal steps and corresponding observations
-        goal_steps = restoration_events.any(dim=-1).nonzero(as_tuple=False)[:, 0]
-        goal_obs = self.obs[:-1][goal_steps]
-        goal_next_obs = self.obs[1:][goal_steps]
-
-        return goal_obs, goal_next_obs, goal_steps
-
-    def get_pred_data_loader(self, nbatch: int) -> Iterator[Dict[str, th.Tensor]]:
-        goal_obs, goal_next_obs, goal_steps = self.get_goals()
-
-        # Get restoration indices for food and water
-        food_restored_indices = (self.vitals[1:, :, 0] > self.vitals[:-1, :, 0]).nonzero(as_tuple=False)
-        water_restored_indices = (self.vitals[1:, :, 1] > self.vitals[:-1, :, 1]).nonzero(as_tuple=False)
-
-        training_pairs = []
-        for t in range(self.nstep):
-            for proc in range(self.nproc):
-                current_vitals = self.vitals[t, proc]
-                is_hungry = current_vitals[0] < 4
-                is_thirsty = current_vitals[1] < 4
-
-                if is_hungry or is_thirsty:
-                    future_food_restorations = food_restored_indices[
-                        (food_restored_indices[:, 0] > t) & (food_restored_indices[:, 1] == proc)
-                    ]
-                    future_water_restorations = water_restored_indices[
-                        (water_restored_indices[:, 0] > t) & (water_restored_indices[:, 1] == proc)
-                    ]
-
-                    nearest_restoration_step = float('inf')
-                    
-                    if is_hungry and len(future_food_restorations) > 0:
-                        nearest_restoration_step = min(nearest_restoration_step, future_food_restorations[0, 0])
-                    
-                    if is_thirsty and len(future_water_restorations) > 0:
-                        nearest_restoration_step = min(nearest_restoration_step, future_water_restorations[0, 0])
-
-                    if nearest_restoration_step != float('inf'):
-                        current_state_idx = t * self.nproc + proc
-                        target_state_obs = self.obs[nearest_restoration_step + 1, proc]
-                        training_pairs.append((self.obs[t, proc], target_state_obs))
-
-        if not training_pairs:
-            # Create a dummy loader if no pairs are found, to avoid errors
-            return iter([])
-
-        # Create dataset and dataloader
-        obs_pairs, next_obs_pairs = zip(*training_pairs)
-        obs_tensor = th.stack(obs_pairs)
-        next_obs_tensor = th.stack(next_obs_pairs)
-
-        dataset = th.utils.data.TensorDataset(obs_tensor, next_obs_tensor)
-        sampler = BatchSampler(SubsetRandomSampler(range(len(dataset))), batch_size=nbatch, drop_last=True)
-
-        # The default collate_fn is sufficient for TensorDataset
-        return th.utils.data.DataLoader(dataset, sampler=sampler)
 
     def get_data_loader(self, nbatch: int) -> Iterator[Dict[str, th.Tensor]]:
         # Get sampler
