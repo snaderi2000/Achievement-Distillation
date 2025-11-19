@@ -107,6 +107,7 @@ class Buffer:
 
             goals = self.get_goals(obs, vitals, next_vitals)
             traj.update(goals)
+            traj["pred_pairs"] = self.get_pred_pairs(traj)
 
     def get_goals(
         self,
@@ -149,6 +150,49 @@ class Buffer:
         }
         return goals
 
+    def get_pred_pairs(self, traj: Dict[str, th.Tensor]) -> List[Dict[str, int]]:
+        obs = traj["obs"]
+        vitals = traj["vitals"]
+        next_vitals = traj["next_vitals"]
+        goal_steps = traj["goal_steps"]
+
+        if len(obs) <= 1 or len(goal_steps) == 0:
+            return []
+
+        goal_step_to_idx = {int(step.item()): idx for idx, step in enumerate(goal_steps)}
+
+        deficit_mask = vitals < self.vital_threshold
+        restoration_mask = (next_vitals > vitals) & deficit_mask
+        pairs: List[Dict[str, int]] = []
+
+        for t in range(len(obs) - 1):
+            needy_dims = deficit_mask[t].nonzero(as_tuple=False).flatten()
+            if len(needy_dims) == 0:
+                continue
+
+            best_step = None
+
+            for dim in needy_dims.tolist():
+                future_events = restoration_mask[t:, dim]
+                future_steps = future_events.nonzero(as_tuple=False).flatten()
+                if len(future_steps) == 0:
+                    continue
+                candidate_step = t + future_steps[0].item()
+                if best_step is None or candidate_step < best_step:
+                    best_step = candidate_step
+
+            if best_step is None:
+                continue
+
+            goal_step_value = best_step + 1
+            goal_idx = goal_step_to_idx.get(goal_step_value)
+            if goal_idx is None:
+                continue
+
+            pairs.append({"need_step": t, "goal_idx": goal_idx})
+
+        return pairs
+
     def get_next_goals(
         self,
         goal_steps: th.Tensor,
@@ -186,7 +230,7 @@ class Buffer:
         self,
         max_batch_size: int = 512,
     ) -> Iterator[Dict[str, th.Tensor]]:
-        trajs = [traj for traj in self.trajs if len(traj["goal_obs"]) > 0]
+        trajs = [traj for traj in self.trajs if len(traj["pred_pairs"]) > 0]
         ntraj = len(trajs)
 
         if ntraj == 0:
@@ -194,17 +238,47 @@ class Buffer:
 
         for i in th.randperm(ntraj):
             traj = trajs[i]
+            pairs = traj["pred_pairs"]
+            pair_need_steps = th.tensor([pair["need_step"] for pair in pairs], dtype=th.long)
+            pair_goal_indices = th.tensor([pair["goal_idx"] for pair in pairs], dtype=th.long)
+
+            obs = traj["obs"]
+            actions = traj["actions"]
+            old_states = traj["old_states"]
+            old_vtargs = traj["old_vtargs"]
             goal_obs = traj["goal_obs"]
             goal_next_obs = traj["goal_next_obs"]
 
-            ndata = len(goal_obs)
+            anc_goal_obs = goal_obs[pair_goal_indices]
+            anc_goal_next_obs = goal_next_obs[pair_goal_indices]
+
+            pos_obs = obs[pair_need_steps]
+            pos_actions = actions[pair_need_steps]
+            pos_old_states = old_states[pair_need_steps]
+            pos_old_vtargs = old_vtargs[pair_need_steps]
+
+            ndata = len(pairs)
+            rand_inds = th.randint(len(obs), (ndata,))
+            neg_obs = obs[rand_inds]
+            neg_actions = actions[rand_inds]
+            neg_old_states = old_states[rand_inds]
+            neg_old_vtargs = old_vtargs[rand_inds]
+
             sampler = SubsetRandomSampler(range(ndata))
             sampler = BatchSampler(sampler, batch_size=max_batch_size, drop_last=False)
 
             for inds in sampler:
                 batch = {
-                    "obs": goal_obs[inds].cuda(),
-                    "next_obs": goal_next_obs[inds].cuda(),
+                    "anc_goal_obs": anc_goal_obs[inds].cuda(),
+                    "anc_goal_next_obs": anc_goal_next_obs[inds].cuda(),
+                    "pos_obs": pos_obs[inds].cuda(),
+                    "pos_actions": pos_actions[inds].cuda(),
+                    "pos_old_states": pos_old_states[inds].cuda(),
+                    "pos_old_vtargs": pos_old_vtargs[inds].cuda(),
+                    "neg_obs": neg_obs[inds].cuda(),
+                    "neg_actions": neg_actions[inds].cuda(),
+                    "neg_old_states": neg_old_states[inds].cuda(),
+                    "neg_old_vtargs": neg_old_vtargs[inds].cuda(),
                 }
                 yield batch
 
