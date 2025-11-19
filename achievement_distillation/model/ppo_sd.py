@@ -93,7 +93,7 @@ class PPOSDModel(PPOModel):
         self,
         obs: th.Tensor,
         next_obs: th.Tensor,
-        old_model: PPOADModel,
+        old_model: "PPOSDModel",
     ) -> Dict[str, th.Tensor]:
         # Encode observations
         latents = self.encode(obs)

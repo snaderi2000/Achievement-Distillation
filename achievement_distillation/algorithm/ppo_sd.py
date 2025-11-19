@@ -11,14 +11,14 @@ from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 from ot.partial import entropic_partial_wasserstein
 
 from achievement_distillation.algorithm.base import BaseAlgorithm
-from achievement_distillation.model.ppo_ad import PPOADModel
+from achievement_distillation.model.ppo_sd import PPOSDModel
 from achievement_distillation.storage_sd import RolloutStorage
 
 
 class PPOSDAlgorithm(BaseAlgorithm):
     def __init__(
         self,
-        model: PPOADModel,
+        model: PPOSDModel,
         ppo_nepoch: int,
         ppo_nbatch: int,
         clip_param: float,
@@ -32,7 +32,7 @@ class PPOSDAlgorithm(BaseAlgorithm):
         vf_dist_coef: int,
     ):
         super().__init__(model)
-        self.model: PPOADModel
+        self.model: PPOSDModel
 
         # PPO params
         self.ppo_nepoch = ppo_nepoch
@@ -118,9 +118,11 @@ class PPOSDAlgorithm(BaseAlgorithm):
                 pred_data_loader = storage.get_pred_data_loader(nbatch=self.ppo_nbatch)
 
                 for batch in pred_data_loader:
+                    # Convert list to dict
+                    batch_dict = {"obs": batch[0], "next_obs": batch[1]}
                     # Compute pred loss
                     pred_losses = self.model.compute_pred_losses(
-                        **batch,
+                        **batch_dict,
                         old_model=old_model,
                     )
                     pred_loss = pred_losses["pred_loss"]
@@ -146,7 +148,7 @@ class PPOSDAlgorithm(BaseAlgorithm):
 
             # Compute average stats
             if pred_nupdate > 0:
-                pred_loss_epoch /= pred_nupdate
+            pred_loss_epoch /= pred_nupdate
                 pi_dist_epoch /= pred_nupdate
                 vf_dist_epoch /= pred_nupdate
 
