@@ -186,60 +186,25 @@ class Buffer:
         self,
         max_batch_size: int = 512,
     ) -> Iterator[Dict[str, th.Tensor]]:
-        ntraj = len(self.trajs)
+        trajs = [traj for traj in self.trajs if len(traj["goal_obs"]) > 0]
+        ntraj = len(trajs)
+
+        if ntraj == 0:
+            return iter([])
 
         for i in th.randperm(ntraj):
-            traj = self.trajs[i]
-            obs = traj["obs"]
-            actions = traj["actions"]
-            old_states = traj["old_states"]
-            old_vtargs = traj["old_vtargs"]
-            goal_steps = traj["goal_steps"]
+            traj = trajs[i]
             goal_obs = traj["goal_obs"]
             goal_next_obs = traj["goal_next_obs"]
 
-            if len(goal_steps) == 0:
-                continue
-
-            next_goal_obs, next_goal_next_obs = self.get_next_goals(
-                goal_steps,
-                goal_obs,
-                goal_next_obs,
-                obs,
-            )
-
-            assert len(obs) == len(next_goal_obs)
-
-            anc_goal_obs = next_goal_obs
-            anc_goal_next_obs = next_goal_next_obs
-
-            pos_obs = obs
-            pos_actions = actions
-            pos_old_states = old_states
-            pos_old_vtargs = old_vtargs
-
-            ndata = len(obs)
-            rand_steps = th.randperm(ndata)
-            neg_obs = obs[rand_steps]
-            neg_actions = actions[rand_steps]
-            neg_old_states = old_states[rand_steps]
-            neg_old_vtargs = old_vtargs[rand_steps]
-
+            ndata = len(goal_obs)
             sampler = SubsetRandomSampler(range(ndata))
             sampler = BatchSampler(sampler, batch_size=max_batch_size, drop_last=False)
 
             for inds in sampler:
                 batch = {
-                    "anc_goal_obs": anc_goal_obs[inds].cuda(),
-                    "anc_goal_next_obs": anc_goal_next_obs[inds].cuda(),
-                    "pos_obs": pos_obs[inds].cuda(),
-                    "pos_actions": pos_actions[inds].cuda(),
-                    "pos_old_states": pos_old_states[inds].cuda(),
-                    "pos_old_vtargs": pos_old_vtargs[inds].cuda(),
-                    "neg_obs": neg_obs[inds].cuda(),
-                    "neg_actions": neg_actions[inds].cuda(),
-                    "neg_old_states": neg_old_states[inds].cuda(),
-                    "neg_old_vtargs": neg_old_vtargs[inds].cuda(),
+                    "obs": goal_obs[inds].cuda(),
+                    "next_obs": goal_next_obs[inds].cuda(),
                 }
                 yield batch
 
@@ -252,7 +217,7 @@ class Buffer:
         ntraj = len(trajs)
 
         if ntraj <= 1:
-            return
+            return iter([])
 
         for i in th.randperm(ntraj):
             traj_s = trajs[i]
