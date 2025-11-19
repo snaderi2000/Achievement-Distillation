@@ -20,6 +20,11 @@ class Buffer:
         self.segs: List[Dict[str, th.Tensor]] = deque(maxlen=maxlen)
         self.trajs: List[Dict[str, th.Tensor]] = []
         self.vital_threshold = vital_threshold
+        self.cross_traj_goals: Dict[int, List[Dict[str, th.Tensor]]] = {
+            0: [],
+            1: [],
+            2: [],
+        }
         self.reset_counters()
 
     def reset_counters(self):
@@ -36,6 +41,7 @@ class Buffer:
     def parse_segs(self):
         # Clear trajectories
         self.trajs.clear()
+        self.cross_traj_goals = {0: [], 1: [], 2: []}
 
         if len(self.segs) == 0:
             return
@@ -103,6 +109,24 @@ class Buffer:
                     "next_vitals": next_vitals_t,
                 }
                 self.trajs.append(traj)
+                self.register_cross_traj_goals(traj)
+
+    def register_cross_traj_goals(self, traj: Dict[str, th.Tensor]):
+        goal_obs = traj["goal_obs"]
+        goal_next_obs = traj["goal_next_obs"]
+        goal_vital_idx = traj["goal_vital_idx"]
+
+        if len(goal_obs) == 0:
+            return
+
+        for idx in range(len(goal_obs)):
+            vital_idx = int(goal_vital_idx[idx].item())
+            self.cross_traj_goals[vital_idx].append(
+                {
+                    "goal_obs": goal_obs[idx].cpu(),
+                    "goal_next_obs": goal_next_obs[idx].cpu(),
+                }
+            )
 
     def preprocess_trajs(self):
         # Loop over trajectories
@@ -145,14 +169,18 @@ class Buffer:
         if len(goal_steps) == 0:
             goal_obs = th.zeros(0, *obs.shape[1:], dtype=dtype, device=device)
             goal_next_obs = th.zeros(0, *obs.shape[1:], dtype=dtype, device=device)
+            goal_vital_idx = th.zeros(0, dtype=th.long, device=device)
         else:
             goal_obs = obs[goal_steps - 1]
             goal_next_obs = obs[goal_steps]
+            restoration_events = restoration[goal_steps - 1]
+            goal_vital_idx = restoration_events.float().argmax(dim=-1)
 
         goals = {
             "goal_steps": goal_steps,
             "goal_obs": goal_obs,
             "goal_next_obs": goal_next_obs,
+            "goal_vital_idx": goal_vital_idx,
         }
         return goals
 
@@ -161,6 +189,7 @@ class Buffer:
         vitals = traj["vitals"]
         next_vitals = traj["next_vitals"]
         goal_steps = traj["goal_steps"]
+        goal_vital_idx = traj["goal_vital_idx"]
 
         if len(obs) <= 1 or len(goal_steps) == 0:
             return []
@@ -180,6 +209,7 @@ class Buffer:
                 continue
 
             best_step = None
+            best_dim = None
 
             for dim in needy_dims.tolist():
                 future_events = restoration_mask[t:, dim]
@@ -189,19 +219,55 @@ class Buffer:
                 candidate_step = t + future_steps[0].item()
                 if best_step is None or candidate_step < best_step:
                     best_step = candidate_step
+                    best_dim = dim
 
             if best_step is None:
+                alt_pair = self.get_cross_traj_pair(needy_dims.tolist(), need_step=t)
+                if alt_pair is None:
+                    continue
+                pairs.append(alt_pair)
+                self.pair_count += 1
                 continue
 
             goal_step_value = best_step + 1
             goal_idx = goal_step_to_idx.get(goal_step_value)
             if goal_idx is None:
+                alt_pair = self.get_cross_traj_pair(
+                    [best_dim] if best_dim is not None else needy_dims.tolist(),
+                    need_step=t,
+                )
+                if alt_pair is None:
+                    continue
+                pairs.append(alt_pair)
+                self.pair_count += 1
                 continue
 
-            pairs.append({"need_step": t, "goal_idx": goal_idx})
+            pairs.append(
+                {
+                    "need_step": t,
+                    "goal_idx": goal_idx,
+                    "cross": False,
+                }
+            )
             self.pair_count += 1
 
         return pairs
+    def get_cross_traj_pair(
+        self, needy_dims: List[int], need_step: int
+    ) -> Dict[str, th.Tensor] | None:
+        for dim in needy_dims:
+            goals = self.cross_traj_goals.get(dim, [])
+            if len(goals) == 0:
+                continue
+            goal = goals.pop()
+            return {
+                "need_step": need_step,
+                "cross": True,
+                "cross_goal_obs": goal["goal_obs"],
+                "cross_goal_next_obs": goal["goal_next_obs"],
+            }
+
+        return None
 
     def get_next_goals(
         self,
@@ -249,9 +315,6 @@ class Buffer:
         for i in th.randperm(ntraj):
             traj = trajs[i]
             pairs = traj["pred_pairs"]
-            pair_need_steps = th.tensor([pair["need_step"] for pair in pairs], dtype=th.long)
-            pair_goal_indices = th.tensor([pair["goal_idx"] for pair in pairs], dtype=th.long)
-
             obs = traj["obs"]
             actions = traj["actions"]
             old_states = traj["old_states"]
@@ -259,13 +322,34 @@ class Buffer:
             goal_obs = traj["goal_obs"]
             goal_next_obs = traj["goal_next_obs"]
 
-            anc_goal_obs = goal_obs[pair_goal_indices]
-            anc_goal_next_obs = goal_next_obs[pair_goal_indices]
+            anc_goal_obs_list = []
+            anc_goal_next_obs_list = []
+            pos_obs_list = []
+            pos_actions_list = []
+            pos_states_list = []
+            pos_vtargs_list = []
 
-            pos_obs = obs[pair_need_steps]
-            pos_actions = actions[pair_need_steps]
-            pos_old_states = old_states[pair_need_steps]
-            pos_old_vtargs = old_vtargs[pair_need_steps]
+            for pair in pairs:
+                need_step = pair["need_step"]
+                pos_obs_list.append(obs[need_step])
+                pos_actions_list.append(actions[need_step])
+                pos_states_list.append(old_states[need_step])
+                pos_vtargs_list.append(old_vtargs[need_step])
+
+                if pair.get("cross", False):
+                    anc_goal_obs_list.append(pair["cross_goal_obs"].to(obs.device))
+                    anc_goal_next_obs_list.append(pair["cross_goal_next_obs"].to(obs.device))
+                else:
+                    goal_idx = pair["goal_idx"]
+                    anc_goal_obs_list.append(goal_obs[goal_idx])
+                    anc_goal_next_obs_list.append(goal_next_obs[goal_idx])
+
+            anc_goal_obs = th.stack(anc_goal_obs_list)
+            anc_goal_next_obs = th.stack(anc_goal_next_obs_list)
+            pos_obs = th.stack(pos_obs_list)
+            pos_actions = th.stack(pos_actions_list)
+            pos_old_states = th.stack(pos_states_list)
+            pos_old_vtargs = th.stack(pos_vtargs_list)
 
             ndata = len(pairs)
             rand_inds = th.randint(len(obs), (ndata,))
@@ -495,7 +579,8 @@ class PPOSDAlgorithm(BaseAlgorithm):
                 "[SD Buffer] needy_count="
                 f"{int(self.buffer.needy_count)} "
                 f"restoration_count={int(self.buffer.restoration_count)} "
-                f"pair_count={int(self.buffer.pair_count)}"
+                f"pair_count={int(self.buffer.pair_count)} "
+                f"cross_pool_sizes={[len(v) for v in self.buffer.cross_traj_goals.values()]}"
             )
             self.buffer.reset_counters()
 
