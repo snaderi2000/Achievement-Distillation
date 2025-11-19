@@ -20,6 +20,12 @@ class Buffer:
         self.segs: List[Dict[str, th.Tensor]] = deque(maxlen=maxlen)
         self.trajs: List[Dict[str, th.Tensor]] = []
         self.vital_threshold = vital_threshold
+        self.reset_counters()
+
+    def reset_counters(self):
+        self.needy_count = 0
+        self.restoration_count = 0
+        self.pair_count = 0
 
     def __len__(self):
         return len(self.segs)
@@ -163,10 +169,13 @@ class Buffer:
 
         deficit_mask = vitals < self.vital_threshold
         restoration_mask = (next_vitals > vitals) & deficit_mask
+        self.restoration_count += restoration_mask.any(dim=-1).float().sum().item()
         pairs: List[Dict[str, int]] = []
 
         for t in range(len(obs) - 1):
             needy_dims = deficit_mask[t].nonzero(as_tuple=False).flatten()
+            if len(needy_dims) > 0:
+                self.needy_count += 1
             if len(needy_dims) == 0:
                 continue
 
@@ -190,6 +199,7 @@ class Buffer:
                 continue
 
             pairs.append({"need_step": t, "goal_idx": goal_idx})
+            self.pair_count += 1
 
         return pairs
 
@@ -481,6 +491,13 @@ class PPOSDAlgorithm(BaseAlgorithm):
         if self.ppo_count % self.aux_freq == 0 and len(self.buffer) > 0:
             self.buffer.parse_segs()
             self.buffer.preprocess_trajs()
+            print(
+                "[SD Buffer] needy_count="
+                f"{int(self.buffer.needy_count)} "
+                f"restoration_count={int(self.buffer.restoration_count)} "
+                f"pair_count={int(self.buffer.pair_count)}"
+            )
+            self.buffer.reset_counters()
 
             old_model = copy.deepcopy(self.model)
             old_model.eval()
