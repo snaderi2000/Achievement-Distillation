@@ -109,7 +109,6 @@ class Buffer:
                     "next_vitals": next_vitals_t,
                 }
                 self.trajs.append(traj)
-                self.register_cross_traj_goals(traj)
 
     def register_cross_traj_goals(self, traj: Dict[str, th.Tensor]):
         goal_obs = traj["goal_obs"]
@@ -138,6 +137,7 @@ class Buffer:
             goals = self.get_goals(obs, vitals, next_vitals)
             traj.update(goals)
             traj["pred_pairs"] = self.get_pred_pairs(traj)
+            self.register_cross_traj_goals(traj)
 
     def get_goals(
         self,
