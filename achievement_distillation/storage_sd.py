@@ -185,12 +185,9 @@ class RolloutStorage:
 
         dataset = th.utils.data.TensorDataset(obs_tensor, next_obs_tensor)
         sampler = BatchSampler(SubsetRandomSampler(range(len(dataset))), batch_size=nbatch, drop_last=True)
-        
-        def collate_fn(batch):
-            obs, next_obs = zip(*batch)
-            return {"obs": th.stack(obs), "next_obs": th.stack(next_obs)}
 
-        return th.utils.data.DataLoader(dataset, sampler=sampler, collate_fn=collate_fn)
+        # The default collate_fn is sufficient for TensorDataset
+        return th.utils.data.DataLoader(dataset, sampler=sampler)
 
     def get_data_loader(self, nbatch: int) -> Iterator[Dict[str, th.Tensor]]:
         # Get sampler
