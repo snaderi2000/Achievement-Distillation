@@ -32,6 +32,11 @@ def sample_rollouts_sd(
         outputs["rewards"] = rewards
         outputs["masks"] = 1.0 - dones
         outputs["vitals"] = infos["vitals"]
+        prev_vitals = storage.vitals[step]
+        vital_delta = infos["vitals"] - prev_vitals
+        deficit_mask = (prev_vitals < 3).float()
+        survival_bonus = 0.5 * (vital_delta.clamp(min=0) * deficit_mask).sum(dim=-1, keepdim=True)
+        outputs["rewards"] = outputs["rewards"] + survival_bonus
 
         # Update storage
         storage.insert(**outputs, model=model)

@@ -36,3 +36,4 @@ algorithm_kwargs:
   pi_dist_coef: 1.0
   vf_dist_coef: 1.0
   vital_threshold: 2
+  min_aux_pairs: 64
