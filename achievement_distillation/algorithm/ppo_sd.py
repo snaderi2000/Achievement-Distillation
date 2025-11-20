@@ -31,6 +31,8 @@ class Buffer:
         self.needy_count = 0
         self.restoration_count = 0
         self.pair_count = 0
+        self.pair_per_vital = [0, 0, 0]
+        self.cross_used_per_vital = [0, 0, 0]
 
     def __len__(self):
         return len(self.segs)
@@ -114,6 +116,8 @@ class Buffer:
         goal_obs = traj["goal_obs"]
         goal_next_obs = traj["goal_next_obs"]
         goal_vital_idx = traj["goal_vital_idx"]
+        goal_needy_mask = traj["goal_needy_mask"]
+        goal_needy_mask = traj["goal_needy_mask"]
 
         if len(goal_obs) == 0:
             return
@@ -161,7 +165,7 @@ class Buffer:
         next_vitals_t = next_vitals[:-1]
 
         deficit = vitals_t < self.vital_threshold
-        restoration = (next_vitals_t > vitals_t) & deficit
+        restoration = next_vitals_t > vitals_t
         goal_conds = restoration.any(dim=-1)
         goal_steps = goal_conds.nonzero(as_tuple=False).flatten()
         goal_steps = goal_steps + 1
@@ -170,17 +174,21 @@ class Buffer:
             goal_obs = th.zeros(0, *obs.shape[1:], dtype=dtype, device=device)
             goal_next_obs = th.zeros(0, *obs.shape[1:], dtype=dtype, device=device)
             goal_vital_idx = th.zeros(0, dtype=th.long, device=device)
+            goal_needy_mask = th.zeros(0, dtype=th.bool, device=device)
         else:
             goal_obs = obs[goal_steps - 1]
             goal_next_obs = obs[goal_steps]
             restoration_events = restoration[goal_steps - 1]
+            deficit_events = deficit[goal_steps - 1]
             goal_vital_idx = restoration_events.float().argmax(dim=-1)
+            goal_needy_mask = deficit_events.any(dim=-1)
 
         goals = {
             "goal_steps": goal_steps,
             "goal_obs": goal_obs,
             "goal_next_obs": goal_next_obs,
             "goal_vital_idx": goal_vital_idx,
+            "goal_needy_mask": goal_needy_mask,
         }
         return goals
 
@@ -190,6 +198,7 @@ class Buffer:
         next_vitals = traj["next_vitals"]
         goal_steps = traj["goal_steps"]
         goal_vital_idx = traj["goal_vital_idx"]
+        goal_needy_mask = traj["goal_needy_mask"]
 
         if len(obs) <= 1 or len(goal_steps) == 0:
             return []
@@ -227,6 +236,9 @@ class Buffer:
                     continue
                 pairs.append(alt_pair)
                 self.pair_count += 1
+                vital = alt_pair.get("cross_vital")
+                if vital is not None and 0 <= vital < 3:
+                    self.cross_used_per_vital[vital] += 1
                 continue
 
             goal_step_value = best_step + 1
@@ -240,18 +252,26 @@ class Buffer:
                     continue
                 pairs.append(alt_pair)
                 self.pair_count += 1
+                vital = alt_pair.get("cross_vital")
+                if vital is not None and 0 <= vital < 3:
+                    self.cross_used_per_vital[vital] += 1
                 continue
 
-            pairs.append(
-                {
-                    "need_step": t,
-                    "goal_idx": goal_idx,
-                    "cross": False,
-                }
-            )
-            self.pair_count += 1
+            if goal_needy_mask[goal_idx]:
+                pairs.append(
+                    {
+                        "need_step": t,
+                        "goal_idx": goal_idx,
+                        "cross": False,
+                    }
+                )
+                self.pair_count += 1
+                vital = int(goal_vital_idx[goal_idx].item())
+                if 0 <= vital < 3:
+                    self.pair_per_vital[vital] += 1
 
         return pairs
+
     def get_cross_traj_pair(
         self, needy_dims: List[int], need_step: int
     ) -> Dict[str, th.Tensor] | None:
@@ -265,6 +285,7 @@ class Buffer:
                 "cross": True,
                 "cross_goal_obs": goal["goal_obs"],
                 "cross_goal_next_obs": goal["goal_next_obs"],
+                "cross_vital": dim,
             }
 
         return None
@@ -498,6 +519,7 @@ class PPOSDAlgorithm(BaseAlgorithm):
         pi_dist_coef: int,
         vf_dist_coef: int,
         vital_threshold: int = 4,
+        min_aux_pairs: int = 64,
     ):
         super().__init__(model)
         self.model: PPOSDModel
@@ -524,6 +546,7 @@ class PPOSDAlgorithm(BaseAlgorithm):
         self.optimizer = optim.Adam(model.parameters(), lr=lr)
         self.match_optimizer = optim.Adam(model.parameters(), lr=lr)
         self.pred_optimizer = optim.Adam(model.parameters(), lr=lr)
+        self.min_aux_pairs = min_aux_pairs
 
     def update(self, storage: RolloutStorage):
         # Set model to training mode
@@ -575,14 +598,26 @@ class PPOSDAlgorithm(BaseAlgorithm):
         if self.ppo_count % self.aux_freq == 0 and len(self.buffer) > 0:
             self.buffer.parse_segs()
             self.buffer.preprocess_trajs()
+            cross_pool_sizes = [len(v) for v in self.buffer.cross_traj_goals.values()]
+            pair_per_vital = list(self.buffer.pair_per_vital)
+            cross_used = list(self.buffer.cross_used_per_vital)
+            pair_count = int(self.buffer.pair_count)
             print(
-                "[SD Buffer] needy_count="
-                f"{int(self.buffer.needy_count)} "
+                "[SD Buffer] "
+                f"needy_count={int(self.buffer.needy_count)} "
                 f"restoration_count={int(self.buffer.restoration_count)} "
-                f"pair_count={int(self.buffer.pair_count)} "
-                f"cross_pool_sizes={[len(v) for v in self.buffer.cross_traj_goals.values()]}"
+                f"pair_count={pair_count} "
+                f"pair_per_vital={pair_per_vital} "
+                f"cross_used={cross_used} "
+                f"cross_pool_sizes={cross_pool_sizes}"
             )
+            should_run_aux = pair_count >= self.min_aux_pairs
             self.buffer.reset_counters()
+            if not should_run_aux:
+                print(
+                    f"[SD Buffer] skipping aux (pair_count={pair_count} < {self.min_aux_pairs})"
+                )
+                return train_stats
 
             old_model = copy.deepcopy(self.model)
             old_model.eval()

@@ -35,4 +35,4 @@ algorithm_kwargs:
   aux_nepoch: 6
   pi_dist_coef: 1.0
   vf_dist_coef: 1.0
-  vital_threshold: 4
+  vital_threshold: 2
