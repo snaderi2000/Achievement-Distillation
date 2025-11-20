@@ -1,5 +1,6 @@
 from typing import Dict
 import numpy as np
+import torch as th
 
 from achievement_distillation.wrapper import VecPyTorch
 from achievement_distillation.storage import RolloutStorage
@@ -20,6 +21,10 @@ def sample_rollouts(
     achievements = []
     successes = []
 
+    # Track last-seen vitals to compute reward shaping bonuses
+    last_vitals = th.zeros(storage.nproc, 3, device=venv.device)
+    has_prev_vitals = th.zeros(storage.nproc, dtype=th.bool, device=venv.device)
+
     for step in range(storage.nstep):
         # Pass through model
         inputs = storage.get_inputs(step)
@@ -32,6 +37,20 @@ def sample_rollouts(
         outputs["rewards"] = rewards
         outputs["masks"] = 1.0 - dones
         outputs["successes"] = infos["successes"]
+
+        # Reward shaping: when hunger/thirst was low (<4) and improves, grant +0.75
+        current_vitals = infos.get("vitals")
+        if current_vitals is not None:
+            prev_available = has_prev_vitals.unsqueeze(-1).expand(-1, 2)
+            low_mask = (last_vitals[:, :2] < 4) & prev_available
+            vital_delta = (current_vitals[:, :2] - last_vitals[:, :2]).clamp(min=0)
+            bonus = 0.75 * (vital_delta * low_mask.float()).sum(dim=-1, keepdim=True)
+            outputs["rewards"] = outputs["rewards"] + bonus
+            last_vitals = current_vitals.clone()
+            done_mask = dones.squeeze(-1).bool()
+            has_prev_vitals[:] = True
+            has_prev_vitals[done_mask] = False
+            last_vitals[done_mask] = 0
 
         # Update storage
         storage.insert(**outputs, model=model)
