@@ -19,9 +19,7 @@ from achievement_distillation.constant import TASKS
 from achievement_distillation.logger import Logger
 from achievement_distillation.model import *
 from achievement_distillation.sample import sample_rollouts
-from achievement_distillation.sample_sd import sample_rollouts_sd
 from achievement_distillation.storage import RolloutStorage
-from achievement_distillation.storage_sd import RolloutStorage as RolloutStorageSD
 from achievement_distillation.wrapper import VecPyTorch
 
 
@@ -29,8 +27,6 @@ def main(args):
     # Load config file
     config_file = open(f"configs/{args.exp_name}.yaml", "r")
     config = yaml.load(config_file, Loader=yaml.FullLoader)
-
-    is_sd = "sd" in args.exp_name
 
     # Fix random seed
     random.seed(args.seed)
@@ -72,21 +68,13 @@ def main(args):
     obs = venv.reset()
 
     # Create storage
-    storage_cls = RolloutStorageSD if is_sd else RolloutStorage
-    storage_kwargs = {}
-    if is_sd:
-        storage_kwargs["vital_threshold"] = config["algorithm_kwargs"].get(
-            "vital_threshold", 4
-        )
-
-    storage = storage_cls(
+    storage = RolloutStorage(
         nstep=config["nstep"],
         nproc=config["nproc"],
         observation_space=venv.observation_space,
         action_space=venv.action_space,
         hidsize=config["model_kwargs"]["hidsize"],
         device=device,
-        **storage_kwargs,
     )
     storage.obs[0].copy_(obs)
 
@@ -112,8 +100,7 @@ def main(args):
 
     for epoch in range(1, config["nepoch"] + 1):
         # Sample episodes
-        sample_fn = sample_rollouts_sd if is_sd else sample_rollouts
-        rollout_stats = sample_fn(venv, model, storage)
+        rollout_stats = sample_rollouts(venv, model, storage)
 
         # Compute returns
         storage.compute_returns(config["gamma"], config["gae_lambda"])
