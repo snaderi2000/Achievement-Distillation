@@ -61,7 +61,8 @@ def sample_rollouts(
 
         bonus = 0.75 * (relevant_delta * relevant_low.float() * relevant_valid).sum(dim=-1, keepdim=True)
 
-
+        # Apply bonus to rewards
+        outputs["rewards"] = outputs["rewards"] + bonus
 
         # ADDED DEBUGGING STATEMENTS:
         # Check if any bonus was calculated in the current batch
@@ -77,9 +78,8 @@ def sample_rollouts(
             print(f"Low Mask (Relevant): {relevant_low[proc_idx].cpu().numpy()}")
             print("--------------------------------")
 
-            
-        # Apply bonus to rewards
-        outputs["rewards"] = outputs["rewards"] + bonus
+
+        
 
         last_vitals = current_vitals.clone()
         has_prev_vitals[:] = True
