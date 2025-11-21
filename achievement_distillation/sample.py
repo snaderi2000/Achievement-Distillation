@@ -45,48 +45,52 @@ def sample_rollouts(
 
         current_vitals = infos["vitals"]
 
-        prev_available = has_prev_vitals.unsqueeze(-1).expand(-1, 3)
+        if step % 100 == 0:  # Print every 100 steps to avoid spam
+            v_data = current_vitals[0].cpu().numpy()
+            print(f"Step {step} | Vitals Shape: {v_data.shape} | Values: {v_data}")
 
-        low_mask = (last_vitals[:, :3] < 4) & prev_available
+        # prev_available = has_prev_vitals.unsqueeze(-1).expand(-1, 3)
 
-        vital_delta = (current_vitals - last_vitals[:, :3]).clamp(min=0)
+        # low_mask = (last_vitals[:, :3] < 4) & prev_available
 
-        # resurrection bug fix 
-        valid_step_mask = outputs["masks"].expand(-1, 3)
+        # vital_delta = (current_vitals - last_vitals[:, :3]).clamp(min=0)
 
-        # Isolate food and drink vitals
-        relevant_delta = vital_delta[:, :2] * valid_step_mask[:, :2]
-        relevant_low = low_mask[:, :2]
-        relevant_valid = valid_step_mask[:, :2]
+        # # resurrection bug fix 
+        # valid_step_mask = outputs["masks"].expand(-1, 3)
 
-        bonus = 0.75 * (relevant_delta * relevant_low.float() * relevant_valid).sum(dim=-1, keepdim=True)
+        # # Isolate food and drink vitals
+        # safe_delta = vital_delta * valid_step_mask
+        # target_delta = safe_delta[:1:3]
+        
 
-        # Apply bonus to rewards
-        outputs["rewards"] = outputs["rewards"] + bonus
+        # bonus = 0.75 * (relevant_delta * relevant_low.float() * relevant_valid).sum(dim=-1, keepdim=True)
 
-        # ADDED DEBUGGING STATEMENTS:
-        # Check if any bonus was calculated in the current batch
-        if bonus.sum().item() > 1e-4:
-            # Check the state of the first environment process (index 0)
-            proc_idx = 0 
-            print("--- REWARD SHAPING TRIGGERED ---")
-            print(f"Step: {step}")
-            print(f"Bonus for proc {proc_idx}: {bonus[proc_idx].item():.4f}")
-            print(f"Original reward for proc {proc_idx}: {rewards[proc_idx].item():.4f}")
-            print(f"New total reward for proc {proc_idx}: {outputs['rewards'][proc_idx].item():.4f}")
-            print(f"Vitals (Last/Current) for proc {proc_idx}: {last_vitals[proc_idx].cpu().numpy()} -> {current_vitals[proc_idx].cpu().numpy()}")
-            print(f"Low Mask (Relevant): {relevant_low[proc_idx].cpu().numpy()}")
-            print("--------------------------------")
+        # # Apply bonus to rewards
+        # outputs["rewards"] = outputs["rewards"] + bonus
+
+        # # ADDED DEBUGGING STATEMENTS:
+        # # Check if any bonus was calculated in the current batch
+        # if bonus.sum().item() > 1e-4:
+        #     # Check the state of the first environment process (index 0)
+        #     proc_idx = 0 
+        #     print("--- REWARD SHAPING TRIGGERED ---")
+        #     print(f"Step: {step}")
+        #     print(f"Bonus for proc {proc_idx}: {bonus[proc_idx].item():.4f}")
+        #     print(f"Original reward for proc {proc_idx}: {rewards[proc_idx].item():.4f}")
+        #     print(f"New total reward for proc {proc_idx}: {outputs['rewards'][proc_idx].item():.4f}")
+        #     print(f"Vitals (Last/Current) for proc {proc_idx}: {last_vitals[proc_idx].cpu().numpy()} -> {current_vitals[proc_idx].cpu().numpy()}")
+        #     print(f"Low Mask (Relevant): {relevant_low[proc_idx].cpu().numpy()}")
+        #     print("--------------------------------")
 
 
         
 
-        last_vitals = current_vitals.clone()
-        has_prev_vitals[:] = True
+        # last_vitals = current_vitals.clone()
+        # has_prev_vitals[:] = True
 
-        done_mask = dones.squeeze(-1).bool()
-        has_prev_vitals[done_mask] = False
-        last_vitals[done_mask] = 0
+        # done_mask = dones.squeeze(-1).bool()
+        # has_prev_vitals[done_mask] = False
+        # last_vitals[done_mask] = 0
 
         # Update storage
         storage.insert(**outputs, model=model)
