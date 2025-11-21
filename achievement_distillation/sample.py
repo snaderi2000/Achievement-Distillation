@@ -57,7 +57,7 @@ def sample_rollouts(
         prev_available = has_prev_vitals.unsqueeze(-1).expand(-1, 3)
         
         # Check if stats were low previously
-        low_mask = (last_vitals < 4) & prev_available
+        low_mask = (last_vitals < 7) & prev_available
         
         # Calculate improvement
         vital_delta = (current_vitals - last_vitals).clamp(min=0)
