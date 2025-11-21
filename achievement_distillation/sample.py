@@ -73,10 +73,10 @@ def sample_rollouts(
         # 3. CALCULATE DIFFERENTIAL BONUS
 
         # A. Drink Bonus: +2.00 if Drink is low AND Drink increased AND it's a valid step
-        drink_bonus = 2.00 * drink_is_low * drink_increased * valid_drink_step
+        drink_bonus = 1.50 * drink_is_low * drink_increased * valid_drink_step
 
         # B. Food Bonus: +10.00 if Food is low AND Food increased AND it's a valid step
-        food_bonus = 10.00 * food_is_low * food_increased * valid_food_step
+        food_bonus = 3.00 * food_is_low * food_increased * valid_food_step
 
         # 4. Sum the Bonuses for the total step reward
         # The sum is across the two separate bonuses, then reshaped to (N, 1)
