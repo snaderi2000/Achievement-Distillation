@@ -51,8 +51,6 @@ def sample_rollouts(
 
         vital_delta = (current_vitals - last_vitals).clamp(min=0)
 
-        print(f"Shape of outputs['masks']: {outputs['masks'].shape}")
-
         # resurrection bug fix 
         valid_step_mask = outputs["masks"].expand(-1, 3)
 
@@ -63,6 +61,23 @@ def sample_rollouts(
 
         bonus = 0.75 * (relevant_delta * relevant_low.float() * relevant_valid).sum(dim=-1, keepdim=True)
 
+
+
+        # ADDED DEBUGGING STATEMENTS:
+        # Check if any bonus was calculated in the current batch
+        if bonus.sum().item() > 1e-4:
+            # Check the state of the first environment process (index 0)
+            proc_idx = 0 
+            print("--- REWARD SHAPING TRIGGERED ---")
+            print(f"Step: {step}")
+            print(f"Bonus for proc {proc_idx}: {bonus[proc_idx].item():.4f}")
+            print(f"Original reward for proc {proc_idx}: {rewards[proc_idx].item():.4f}")
+            print(f"New total reward for proc {proc_idx}: {outputs['rewards'][proc_idx].item():.4f}")
+            print(f"Vitals (Last/Current) for proc {proc_idx}: {last_vitals[proc_idx].cpu().numpy()} -> {current_vitals[proc_idx].cpu().numpy()}")
+            print(f"Low Mask (Relevant): {relevant_low[proc_idx].cpu().numpy()}")
+            print("--------------------------------")
+
+            
         # Apply bonus to rewards
         outputs["rewards"] = outputs["rewards"] + bonus
 
