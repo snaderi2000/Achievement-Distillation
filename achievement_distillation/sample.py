@@ -44,32 +44,31 @@ def sample_rollouts(
         # Reward shaping 
 
         
-        # 1. Get separate tensors and concat to [Health, Food, Drink, Energy]
-        food_drink_energy = infos["vitals"]      
-        health = infos["health"].unsqueeze(1)    
-        all_vitals = th.cat([health, food_drink_energy], dim=1) 
+        # 1. Prepare Masks (This part remains largely the same)
+        valid_step_mask = outputs["masks"].expand(-1, 3) # Fixes Resurrection Bug
+        low_mask = (last_vitals < 7) & has_prev_vitals.unsqueeze(-1) # Simplified low_mask (no need to expand prev_available)
 
-        # 2. ISOLATE the 3 we care about: Health(0), Food(1), Drink(2)
-        #    We ignore Energy(3).
-        current_vitals = all_vitals[:, :3]
+        # 2. Identify the Vitals: [Food, Drink, Energy]
+        food_low_mask = low_mask[:, 0].float()  # Index 0
+        drink_low_mask = low_mask[:, 1].float() # Index 1
 
-        # 3. Calculate logic using matching shapes (N, 3)
-        prev_available = has_prev_vitals.unsqueeze(-1).expand(-1, 3)
-        
-        # Check if stats were low previously
-        low_mask = (last_vitals < 7) & prev_available
-        
-        # Calculate improvement
+        # 3. Identify the ACTION that triggered the delta (since we removed delta)
+        # We assume that a change > 0 means the agent performed the appropriate action (Do, Eat Plant, etc.).
+        # We use vital_delta > 0 as a proxy for the action being successful.
         vital_delta = (current_vitals - last_vitals).clamp(min=0)
+        food_increased = (vital_delta[:, 0] > 0).float()
+        drink_increased = (vital_delta[:, 1] > 0).float()
 
-        # 4. Resurrection fix & Bonus Calc
-        valid_step_mask = outputs["masks"].expand(-1, 3)
-        
-        # Apply the valid mask to the delta
-        relevant_delta = vital_delta * valid_step_mask
-        
-        # Calculate bonus
-        bonus = 2.75 * (relevant_delta * low_mask.float()).sum(dim=-1, keepdim=True)
+        # 4. CALCULATE BONUS: Multiplies the fixed reward by the conditions (Low AND Increased AND Valid Step)
+
+        # A. Drink Bonus: +2.00 if Drink is low AND Drink increased AND it's a valid step
+        drink_bonus = 2.00 * drink_low_mask * drink_increased * valid_step_mask[:, 1]
+
+        # B. Food Bonus: +10.00 if Food is low AND Food increased AND it's a valid step
+        food_bonus = 10.00 * food_low_mask * food_increased * valid_step_mask[:, 0]
+
+        # 5. Sum the Bonuses for the total step reward
+        bonus = (drink_bonus + food_bonus).sum(dim=-1, keepdim=True)
 
         # Apply bonus to rewards
         outputs["rewards"] = outputs["rewards"] + bonus
