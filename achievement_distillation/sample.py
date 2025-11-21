@@ -54,7 +54,7 @@ def sample_rollouts(
         print(f"Shape of outputs['masks']: {outputs['masks'].shape}")
 
         # resurrection bug fix 
-        valid_step_mask = outputs["masks"].unsqueeze(-1).expand(-1, 3)
+        valid_step_mask = outputs["masks"].expand(-1, 3)
 
         # Isolate food and drink vitals
         relevant_delta = vital_delta[:, :2] * valid_step_mask[:, :2]
