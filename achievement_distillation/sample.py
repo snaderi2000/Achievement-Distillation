@@ -51,6 +51,8 @@ def sample_rollouts(
 
         vital_delta = (current_vitals - last_vitals).clamp(min=0)
 
+        print(f"Shape of outputs['masks']: {outputs['masks'].shape}")
+
         # resurrection bug fix 
         valid_step_mask = outputs["masks"].unsqueeze(-1).expand(-1, 3)
 
