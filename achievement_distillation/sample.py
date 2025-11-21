@@ -69,7 +69,7 @@ def sample_rollouts(
         relevant_delta = vital_delta * valid_step_mask
         
         # Calculate bonus
-        bonus = 0.75 * (relevant_delta * low_mask.float()).sum(dim=-1, keepdim=True)
+        bonus = 2.75 * (relevant_delta * low_mask.float()).sum(dim=-1, keepdim=True)
 
         # Apply bonus to rewards
         outputs["rewards"] = outputs["rewards"] + bonus
@@ -80,8 +80,9 @@ def sample_rollouts(
             print(f"  Full Vitals Shape: {all_vitals.shape} (Expect N, 4)")
             print(f"  Tracked Vitals Shape: {current_vitals.shape} (Expect N, 3)")
             print(f"  Sample Vitals (H/F/D): {current_vitals[0].cpu().numpy()}")
-            if bonus.sum() > 0:
-                print(f"  Bonus Triggered! Value: {bonus[0].item()}")
+        
+        if bonus.sum() > 0:
+            print(f"!!! BONUS TRIGGERED at Step {step} !!!")
 
         # Update state
         last_vitals = current_vitals.clone()
