@@ -43,54 +43,56 @@ def sample_rollouts(
 
         # Reward shaping 
 
-        current_vitals = infos["vitals"]
-
-        if step % 100 == 0:  # Print every 100 steps to avoid spam
-            v_data = current_vitals[0].cpu().numpy()
-            print(f"Step {step} | Vitals Shape: {v_data.shape} | Values: {v_data}")
-
-        # prev_available = has_prev_vitals.unsqueeze(-1).expand(-1, 3)
-
-        # low_mask = (last_vitals[:, :3] < 4) & prev_available
-
-        # vital_delta = (current_vitals - last_vitals[:, :3]).clamp(min=0)
-
-        # # resurrection bug fix 
-        # valid_step_mask = outputs["masks"].expand(-1, 3)
-
-        # # Isolate food and drink vitals
-        # safe_delta = vital_delta * valid_step_mask
-        # target_delta = safe_delta[:1:3]
         
+        # 1. Get separate tensors and concat to [Health, Food, Drink, Energy]
+        food_drink_energy = infos["vitals"]      
+        health = infos["health"].unsqueeze(1)    
+        all_vitals = th.cat([health, food_drink_energy], dim=1) 
 
-        # bonus = 0.75 * (relevant_delta * relevant_low.float() * relevant_valid).sum(dim=-1, keepdim=True)
+        # 2. ISOLATE the 3 we care about: Health(0), Food(1), Drink(2)
+        #    We ignore Energy(3).
+        current_vitals = all_vitals[:, :3]
 
-        # # Apply bonus to rewards
-        # outputs["rewards"] = outputs["rewards"] + bonus
+        # 3. Calculate logic using matching shapes (N, 3)
+        prev_available = has_prev_vitals.unsqueeze(-1).expand(-1, 3)
+        
+        # Check if stats were low previously
+        low_mask = (last_vitals < 4) & prev_available
+        
+        # Calculate improvement
+        vital_delta = (current_vitals - last_vitals).clamp(min=0)
 
-        # # ADDED DEBUGGING STATEMENTS:
-        # # Check if any bonus was calculated in the current batch
-        # if bonus.sum().item() > 1e-4:
-        #     # Check the state of the first environment process (index 0)
-        #     proc_idx = 0 
-        #     print("--- REWARD SHAPING TRIGGERED ---")
-        #     print(f"Step: {step}")
-        #     print(f"Bonus for proc {proc_idx}: {bonus[proc_idx].item():.4f}")
-        #     print(f"Original reward for proc {proc_idx}: {rewards[proc_idx].item():.4f}")
-        #     print(f"New total reward for proc {proc_idx}: {outputs['rewards'][proc_idx].item():.4f}")
-        #     print(f"Vitals (Last/Current) for proc {proc_idx}: {last_vitals[proc_idx].cpu().numpy()} -> {current_vitals[proc_idx].cpu().numpy()}")
-        #     print(f"Low Mask (Relevant): {relevant_low[proc_idx].cpu().numpy()}")
-        #     print("--------------------------------")
+        # 4. Resurrection fix & Bonus Calc
+        valid_step_mask = outputs["masks"].expand(-1, 3)
+        
+        # Apply the valid mask to the delta
+        relevant_delta = vital_delta * valid_step_mask
+        
+        # Calculate bonus
+        bonus = 0.75 * (relevant_delta * low_mask.float()).sum(dim=-1, keepdim=True)
 
+        # Apply bonus to rewards
+        outputs["rewards"] = outputs["rewards"] + bonus
+
+        # DEBUG: Verify shapes and values
+        if step % 100 == 0:
+            print(f"Step {step} Debug:")
+            print(f"  Full Vitals Shape: {all_vitals.shape} (Expect N, 4)")
+            print(f"  Tracked Vitals Shape: {current_vitals.shape} (Expect N, 3)")
+            print(f"  Sample Vitals (H/F/D): {current_vitals[0].cpu().numpy()}")
+            if bonus.sum() > 0:
+                print(f"  Bonus Triggered! Value: {bonus[0].item()}")
+
+        # Update state
+        last_vitals = current_vitals.clone()
+        has_prev_vitals[:] = True
+        
+        # Reset state for done agents
+        done_mask = dones.squeeze(-1).bool()
+        has_prev_vitals[done_mask] = False
+        last_vitals[done_mask] = 0
 
         
-
-        # last_vitals = current_vitals.clone()
-        # has_prev_vitals[:] = True
-
-        # done_mask = dones.squeeze(-1).bool()
-        # has_prev_vitals[done_mask] = False
-        # last_vitals[done_mask] = 0
 
         # Update storage
         storage.insert(**outputs, model=model)
