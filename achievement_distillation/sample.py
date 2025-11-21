@@ -1,6 +1,6 @@
 from typing import Dict
 import numpy as np
-
+import torch as th
 from achievement_distillation.wrapper import VecPyTorch
 from achievement_distillation.storage import RolloutStorage
 from achievement_distillation.model.base import BaseModel
