@@ -47,9 +47,9 @@ def sample_rollouts(
 
         prev_available = has_prev_vitals.unsqueeze(-1).expand(-1, 3)
 
-        low_mask = (last_vitals < 4) & prev_available
+        low_mask = (last_vitals[:, :3] < 4) & prev_available
 
-        vital_delta = (current_vitals - last_vitals).clamp(min=0)
+        vital_delta = (current_vitals - last_vitals[:, :3]).clamp(min=0)
 
         # resurrection bug fix 
         valid_step_mask = outputs["masks"].expand(-1, 3)
