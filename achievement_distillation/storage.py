@@ -42,6 +42,7 @@ class RolloutStorage:
         self.successes = th.zeros(nstep + 1, nproc, 22, device=device).long()
         self.timesteps = th.zeros(nstep + 1, nproc, 1, device=device).long()
         self.states = th.zeros(nstep + 1, nproc, hidsize, device=device)
+        self.vitals = th.zeros(nstep + 1, nproc, 4, device=device)
 
         # Step
         self.step = 0
@@ -63,6 +64,7 @@ class RolloutStorage:
         vpreds: th.Tensor,
         log_probs: th.Tensor,
         successes: th.Tensor,
+        vitals: Optional[th.Tensor] = None,
         model: BaseModel,
         **kwargs,
     ):
@@ -70,7 +72,6 @@ class RolloutStorage:
         prev_successes = self.successes[self.step]
         prev_states = self.states[self.step]
         prev_timesteps = self.timesteps[self.step]
-
         # Update timesteps
         timesteps = prev_timesteps + 1
 
@@ -91,7 +92,7 @@ class RolloutStorage:
         successes = th.where(done_conds, 0, successes)
         timesteps = th.where(done_conds, 0, timesteps)
         states = th.where(done_conds, 0, states)
-
+    
         # Update tensors
         self.obs[self.step + 1].copy_(obs)
         self.actions[self.step].copy_(actions)
@@ -102,7 +103,8 @@ class RolloutStorage:
         self.successes[self.step + 1].copy_(successes)
         self.timesteps[self.step + 1].copy_(timesteps)
         self.states[self.step + 1].copy_(states)
-
+        if vitals is not None:
+            self.vitals[self.step + 1].copy_(vitals)
         # Update step
         self.step = (self.step + 1) % self.nstep
 
@@ -113,7 +115,7 @@ class RolloutStorage:
         self.successes[0].copy_(self.successes[-1])
         self.timesteps[0].copy_(self.timesteps[-1])
         self.states[0].copy_(self.states[-1])
-
+        self.vitals[0].copy_(self.vitals[-1])
         # Reset step
         self.step = 0
 
@@ -157,5 +159,28 @@ class RolloutStorage:
                 "vtargs": vtargs[indices],
                 "log_probs": log_probs[indices],
                 "advs": advs[indices],
+            }
+            yield batch
+
+    # Load vital states
+
+    def get_survival_loader(self, nbatch: int) -> Iterator[Dict[str, th.Tensor]]:
+        # 1. Flatten dimensions (merge nstep and nproc)
+        # We assume self.vitals is shape (nstep+1, nproc, 4)
+        # We slice [:-1] to ignore the final observation (which has no action/reward following it)
+        obs = self.obs[:-1].view(-1, *self.obs.shape[2:])
+        vitals = self.vitals[:-1].view(-1, *self.vitals.shape[2:])
+
+        # 2. Create Sampler
+        ndata = obs.shape[0]
+        batch_size = ndata // nbatch
+        sampler = SubsetRandomSampler(range(ndata))
+        sampler = BatchSampler(sampler, batch_size=batch_size, drop_last=True)
+
+        # 3. Yield Batches
+        for indices in sampler:
+            batch = {
+                "obs": obs[indices],
+                "vitals": vitals[indices],
             }
             yield batch
