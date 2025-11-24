@@ -64,8 +64,8 @@ class RolloutStorage:
         vpreds: th.Tensor,
         log_probs: th.Tensor,
         successes: th.Tensor,
-        vitals: Optional[th.Tensor] = None,
         model: BaseModel,
+        vitals: Optional[th.Tensor] = None,
         **kwargs,
     ):
         # Get prev successes, timesteps, and states
