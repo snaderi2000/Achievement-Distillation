@@ -41,6 +41,24 @@ If you want to evaluate an agent on a new environment, you can use the following
 python eval.py --exp_name [your exp name] --timestamp [your timestamp]
 ```
 
+
+## Value dataset export
+
+To roll out a trained policy and save per-state value estimates for downstream representation learning, run:
+
+```bash
+python collect_value_map.py \
+  --exp_name ppo \
+  --timestamp <timestamp> \
+  --train_seed 0 \
+  --ckpt_epoch 250 \
+  --num_episodes 10 \
+  --output_dataset_path value_dataset.pt \
+  --value_map_path value_map.png
+```
+
+This exports rollout observations, latent vectors, predicted values, actions, rewards, done flags, episode/step ids, and achievement vectors. If `--value_map_path` is set, the script also saves a 2D PCA visualization of the latent states colored by predicted value and an accompanying `*_embedding.npz` file.
+
 ## Citation
 
 If you find this code useful, please cite this work.
