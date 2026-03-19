@@ -160,6 +160,20 @@ def build_temporal_edges(episode_ids: np.ndarray, step_ids: np.ndarray) -> List[
     return edges
 
 
+def find_latest_mp4(directory: str) -> Optional[str]:
+    if not os.path.isdir(directory):
+        return None
+    candidates = [
+        os.path.join(directory, name)
+        for name in os.listdir(directory)
+        if name.lower().endswith(".mp4")
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=os.path.getmtime)
+    return candidates[-1]
+
+
 def save_value_graph_viewer(
     dataset: Dict[str, th.Tensor],
     output_path: str,
@@ -221,6 +235,9 @@ def save_value_graph_viewer(
             "num_value_edges": len(value_edges),
             "value_min": value_min,
             "value_max": value_max,
+            "value_threshold": None if value_threshold is None else float(value_threshold),
+            "num_neighbors": int(num_neighbors),
+            "max_states": None if max_states is None else int(max_states),
         },
         "nodes": nodes,
         "edges": {
@@ -392,6 +409,8 @@ def save_value_graph_viewer(
           <div><strong>Temporal Edges</strong><span id="meta-temporal"></span></div>
           <div><strong>Value Edges</strong><span id="meta-value"></span></div>
           <div><strong>Value Range</strong><span id="meta-range"></span></div>
+          <div><strong>Value Threshold</strong><span id="meta-threshold"></span></div>
+          <div><strong>Neighbors Per Node</strong><span id="meta-neighbors"></span></div>
         </div>
       </section>
       <section class="card preview-wrap">
@@ -413,6 +432,9 @@ def save_value_graph_viewer(
         <div class="legend-row"><span class="swatch" style="background:#768b78;"></span><span>Temporal rollout edges</span></div>
         <div class="legend-row"><span class="swatch" style="background:#ca7f45;"></span><span>Value-neighbor edges</span></div>
         <div class="legend-row"><span class="swatch" style="background:linear-gradient(90deg,#2c7c7a,#e8c15a,#c95c34);height:10px;"></span><span>Node color tracks predicted value</span></div>
+      </section>
+      <section class="card hint">
+        Graph settings: states are arranged by predicted value on concentric rings, temporal edges connect adjacent rollout states, and value-neighbor edges connect each node to its nearest states in value space subject to the threshold shown above.
       </section>
       <section class="card hint">
         Click a node to keep it selected while you move around the graph. Clicking the background clears the selection.
@@ -439,6 +461,8 @@ def save_value_graph_viewer(
     document.getElementById("meta-temporal").textContent = DATA.meta.num_temporal_edges;
     document.getElementById("meta-value").textContent = DATA.meta.num_value_edges;
     document.getElementById("meta-range").textContent = `${{DATA.meta.value_min.toFixed(2)}} to ${{DATA.meta.value_max.toFixed(2)}}`;
+    document.getElementById("meta-threshold").textContent = DATA.meta.value_threshold === null ? "none" : DATA.meta.value_threshold.toFixed(3);
+    document.getElementById("meta-neighbors").textContent = String(DATA.meta.num_neighbors);
 
     let dpr = window.devicePixelRatio || 1;
     let transform = {{
@@ -469,8 +493,22 @@ def save_value_graph_viewer(
       canvas.height = Math.floor(rect.height * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       if (transform.offsetX === 0 && transform.offsetY === 0) {{
-        transform.offsetX = rect.width / 2;
-        transform.offsetY = rect.height / 2;
+        let minX = Infinity;
+        let maxX = -Infinity;
+        let minY = Infinity;
+        let maxY = -Infinity;
+        for (const node of DATA.nodes) {{
+          minX = Math.min(minX, node.x);
+          maxX = Math.max(maxX, node.x);
+          minY = Math.min(minY, node.y);
+          maxY = Math.max(maxY, node.y);
+        }}
+        const spanX = Math.max(maxX - minX, 1e-6);
+        const spanY = Math.max(maxY - minY, 1e-6);
+        const fitScale = Math.min(rect.width / (spanX * 1.15), rect.height / (spanY * 1.15));
+        transform.scale = Math.min(1200, Math.max(120, fitScale * 1.35));
+        transform.offsetX = rect.width / 2 - ((minX + maxX) / 2) * transform.scale;
+        transform.offsetY = rect.height / 2 - ((minY + maxY) / 2) * transform.scale;
       }}
       draw();
     }}
@@ -688,7 +726,7 @@ def save_value_graph_viewer(
       const mouseY = event.clientY - rect.top;
       const before = screenToWorld(mouseX, mouseY);
       const zoomFactor = event.deltaY < 0 ? 1.12 : 0.9;
-      transform.scale = Math.min(900, Math.max(60, transform.scale * zoomFactor));
+      transform.scale = Math.min(2400, Math.max(60, transform.scale * zoomFactor));
       transform.offsetX = mouseX - before.x * transform.scale;
       transform.offsetY = mouseY - before.y * transform.scale;
       draw();
@@ -714,14 +752,29 @@ def save_value_graph_viewer(
         f.write(html)
 
 
-def collect_value_dataset(model, device: th.device, num_episodes: int, eval_seed: int) -> Dict[str, th.Tensor]:
+def collect_value_dataset(
+    model,
+    device: th.device,
+    num_episodes: int,
+    eval_seed: int,
+    video_directory: Optional[str] = None,
+) -> Tuple[Dict[str, th.Tensor], Optional[str]]:
     from crafter.env import Env
+    from crafter.recorder import VideoRecorder
     from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
 
     from achievement_distillation.constant import TASKS
     from achievement_distillation.wrapper import VecPyTorch
 
-    venv = DummyVecEnv([lambda: Env(seed=eval_seed)])
+    latest_video_path = None
+
+    def make_env():
+        env = Env(seed=eval_seed)
+        if video_directory:
+            env = VideoRecorder(env, directory=video_directory)
+        return env
+
+    venv = DummyVecEnv([make_env])
     venv = VecPyTorch(venv, device=device)
 
     observations: List[th.Tensor] = []
@@ -768,6 +821,9 @@ def collect_value_dataset(model, device: th.device, num_episodes: int, eval_seed
             done = bool(done_tensor.item())
             step_idx += 1
 
+        if video_directory:
+            latest_video_path = find_latest_mp4(video_directory)
+
     venv.close()
 
     dataset = {
@@ -783,7 +839,7 @@ def collect_value_dataset(model, device: th.device, num_episodes: int, eval_seed
         "step_ids": th.tensor(step_ids, dtype=th.long),
         "task_names": TASKS,
     }
-    return dataset
+    return dataset, latest_video_path
 
 
 def save_value_map(dataset: Dict[str, th.Tensor], output_path: str, max_points: int = 5000):
@@ -846,6 +902,7 @@ def main():
     parser.add_argument("--value_graph_max_states", type=int, default=400)
     parser.add_argument("--value_graph_num_neighbors", type=int, default=4)
     parser.add_argument("--value_graph_value_threshold", type=float, default=None)
+    parser.add_argument("--episode_video_dir", type=str, default=None)
     args = parser.parse_args()
 
     device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
@@ -862,11 +919,12 @@ def main():
     print(f"Loaded checkpoint: {ckpt_path}")
     print(f"Using device: {device}")
 
-    dataset = collect_value_dataset(
+    dataset, video_path = collect_value_dataset(
         model=model,
         device=device,
         num_episodes=args.num_episodes,
         eval_seed=args.eval_seed,
+        video_directory=args.episode_video_dir,
     )
 
     th.save(dataset, args.output_dataset_path)
@@ -893,6 +951,9 @@ def main():
             value_threshold=args.value_graph_value_threshold,
         )
         print(f"Saved interactive value-graph viewer to {args.value_graph_html_path}")
+
+    if video_path:
+        print(f"Saved rollout video to {video_path}")
 
 
 if __name__ == "__main__":

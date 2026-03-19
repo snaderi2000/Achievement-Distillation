@@ -69,10 +69,13 @@ python collect_value_map.py \
   --ckpt_epoch 250 \
   --num_episodes 1 \
   --output_dataset_path value_dataset.pt \
-  --value_graph_html_path value_graph.html
+  --value_graph_html_path value_graph.html \
+  --value_graph_num_neighbors 4 \
+  --value_graph_value_threshold 0.25 \
+  --episode_video_dir videos/value-graph-demo
 ```
 
-Open `value_graph.html` in a browser to pan, zoom, hover over nodes, and click a state to pin and enlarge its image. The first version uses predicted value to place states on concentric rings, keeps temporal rollout edges, and adds a small number of nearest neighbors in value space for visual exploration.
+Open `value_graph.html` in a browser to pan, zoom, hover over nodes, and click a state to pin and enlarge its image. The viewer also shows the value-neighbor settings you used to build the graph. If `--episode_video_dir` is set, the rollout is recorded to an `.mp4` in that directory so you can pair the graph with the full episode video.
 
 ## Citation
 
