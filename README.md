@@ -59,6 +59,21 @@ python collect_value_map.py \
 
 This exports rollout observations, latent vectors, predicted values, actions, rewards, done flags, episode/step ids, and achievement vectors. If `--value_map_path` is set, the script also saves a 2D PCA visualization of the latent states colored by predicted value and an accompanying `*_embedding.npz` file.
 
+For a first-pass interactive explorer, you can also export a self-contained HTML value graph from a single rollout episode:
+
+```bash
+python collect_value_map.py \
+  --exp_name ppo \
+  --timestamp <timestamp> \
+  --train_seed 0 \
+  --ckpt_epoch 250 \
+  --num_episodes 1 \
+  --output_dataset_path value_dataset.pt \
+  --value_graph_html_path value_graph.html
+```
+
+Open `value_graph.html` in a browser to pan, zoom, hover over nodes, and click a state to pin and enlarge its image. The first version uses predicted value to place states on concentric rings, keeps temporal rollout edges, and adds a small number of nearest neighbors in value space for visual exploration.
+
 ## Citation
 
 If you find this code useful, please cite this work.
