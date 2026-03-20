@@ -437,7 +437,7 @@ def save_value_graph_viewer(
         Graph settings: states are arranged by predicted value on concentric rings, temporal edges connect adjacent rollout states, and value-neighbor edges connect each node to its nearest states in value space subject to the threshold shown above.
       </section>
       <section class="card hint">
-        Click a node to keep it selected while you move around the graph. Clicking the background clears the selection.
+        Click a node to keep it selected while you move around the graph. Clicking the background clears the selection. Use <code>+</code> and <code>-</code> to zoom, <code>0</code> to refit, and <code>Esc</code> to clear the pinned node.
       </section>
     </aside>
   </div>
@@ -470,6 +470,8 @@ def save_value_graph_viewer(
       offsetX: 0,
       offsetY: 0,
     }};
+    const MIN_SCALE = 20;
+    const MAX_SCALE = 20000;
     let dragging = false;
     let lastMouse = null;
     let hoveredNode = null;
@@ -538,6 +540,14 @@ def save_value_graph_viewer(
         x: (x - transform.offsetX) / transform.scale,
         y: (y - transform.offsetY) / transform.scale,
       }};
+    }}
+
+    function zoomAtPoint(mouseX, mouseY, zoomFactor) {{
+      const before = screenToWorld(mouseX, mouseY);
+      transform.scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, transform.scale * zoomFactor));
+      transform.offsetX = mouseX - before.x * transform.scale;
+      transform.offsetY = mouseY - before.y * transform.scale;
+      draw();
     }}
 
     function drawEdge(edge, strokeStyle, alpha, lineWidth) {{
@@ -724,12 +734,9 @@ def save_value_graph_viewer(
       const rect = canvas.getBoundingClientRect();
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
-      const before = screenToWorld(mouseX, mouseY);
-      const zoomFactor = event.deltaY < 0 ? 1.12 : 0.9;
-      transform.scale = Math.min(2400, Math.max(60, transform.scale * zoomFactor));
-      transform.offsetX = mouseX - before.x * transform.scale;
-      transform.offsetY = mouseY - before.y * transform.scale;
-      draw();
+      const intensity = event.ctrlKey ? 0.0035 : 0.0018;
+      const zoomFactor = Math.exp(-event.deltaY * intensity);
+      zoomAtPoint(mouseX, mouseY, zoomFactor);
     }}, {{ passive: false }});
 
     window.addEventListener("keydown", (event) => {{
@@ -737,6 +744,24 @@ def save_value_graph_viewer(
         pinnedNode = null;
         renderPreview(hoveredNode);
         draw();
+        return;
+      }}
+
+      const rect = canvas.getBoundingClientRect();
+      const centerX = rect.width / 2;
+      const centerY = rect.height / 2;
+      if (event.key === "+" || event.key === "=") {{
+        zoomAtPoint(centerX, centerY, 1.25);
+        return;
+      }}
+      if (event.key === "-" || event.key === "_") {{
+        zoomAtPoint(centerX, centerY, 0.8);
+        return;
+      }}
+      if (event.key === "0") {{
+        transform.offsetX = 0;
+        transform.offsetY = 0;
+        resizeCanvas();
       }}
     }});
 
