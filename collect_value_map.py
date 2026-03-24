@@ -1,10 +1,29 @@
 import argparse
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
 import base64
 import importlib
 import json
 import os
 import random
 from typing import Dict, List, Optional, Sequence, Tuple
+=======
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+import importlib
+import os
+import random
+from typing import Dict, List
+<<<<<<< ours
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
 
 import numpy as np
 import torch as th
@@ -68,6 +87,9 @@ def pca_2d(latents: np.ndarray) -> np.ndarray:
     return centered @ components
 
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
 def observation_to_uint8_hwc(observation: th.Tensor) -> np.ndarray:
     obs = observation.detach().cpu().numpy()
     if obs.ndim != 3:
@@ -786,11 +808,26 @@ def collect_value_dataset(
 ) -> Tuple[Dict[str, th.Tensor], Optional[str]]:
     from crafter.env import Env
     from crafter.recorder import VideoRecorder
+=======
+def collect_value_dataset(model, device: th.device, num_episodes: int, eval_seed: int) -> Dict[str, th.Tensor]:
+    from crafter.env import Env
+>>>>>>> theirs
+=======
+def collect_value_dataset(model, device: th.device, num_episodes: int, eval_seed: int) -> Dict[str, th.Tensor]:
+    from crafter.env import Env
+>>>>>>> theirs
+=======
+def collect_value_dataset(model, device: th.device, num_episodes: int, eval_seed: int) -> Dict[str, th.Tensor]:
+    from crafter.env import Env
+>>>>>>> theirs
     from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
 
     from achievement_distillation.constant import TASKS
     from achievement_distillation.wrapper import VecPyTorch
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
     latest_video_path = None
 
     def make_env():
@@ -800,6 +837,15 @@ def collect_value_dataset(
         return env
 
     venv = DummyVecEnv([make_env])
+=======
+    venv = DummyVecEnv([lambda: Env(seed=eval_seed)])
+>>>>>>> theirs
+=======
+    venv = DummyVecEnv([lambda: Env(seed=eval_seed)])
+>>>>>>> theirs
+=======
+    venv = DummyVecEnv([lambda: Env(seed=eval_seed)])
+>>>>>>> theirs
     venv = VecPyTorch(venv, device=device)
 
     observations: List[th.Tensor] = []
@@ -846,9 +892,18 @@ def collect_value_dataset(
             done = bool(done_tensor.item())
             step_idx += 1
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
         if video_directory:
             latest_video_path = find_latest_mp4(video_directory)
 
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
     venv.close()
 
     dataset = {
@@ -864,7 +919,19 @@ def collect_value_dataset(
         "step_ids": th.tensor(step_ids, dtype=th.long),
         "task_names": TASKS,
     }
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
     return dataset, latest_video_path
+=======
+    return dataset
+>>>>>>> theirs
+=======
+    return dataset
+>>>>>>> theirs
+=======
+    return dataset
+>>>>>>> theirs
 
 
 def save_value_map(dataset: Dict[str, th.Tensor], output_path: str, max_points: int = 5000):
@@ -923,11 +990,20 @@ def main():
     parser.add_argument("--output_dataset_path", type=str, default="value_dataset.pt")
     parser.add_argument("--value_map_path", type=str, default=None)
     parser.add_argument("--value_map_max_points", type=int, default=5000)
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
     parser.add_argument("--value_graph_html_path", type=str, default=None)
     parser.add_argument("--value_graph_max_states", type=int, default=400)
     parser.add_argument("--value_graph_num_neighbors", type=int, default=4)
     parser.add_argument("--value_graph_value_threshold", type=float, default=None)
     parser.add_argument("--episode_video_dir", type=str, default=None)
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
     args = parser.parse_args()
 
     device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
@@ -944,12 +1020,33 @@ def main():
     print(f"Loaded checkpoint: {ckpt_path}")
     print(f"Using device: {device}")
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
     dataset, video_path = collect_value_dataset(
+=======
+    dataset = collect_value_dataset(
+>>>>>>> theirs
+=======
+    dataset = collect_value_dataset(
+>>>>>>> theirs
+=======
+    dataset = collect_value_dataset(
+>>>>>>> theirs
         model=model,
         device=device,
         num_episodes=args.num_episodes,
         eval_seed=args.eval_seed,
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
         video_directory=args.episode_video_dir,
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
     )
 
     th.save(dataset, args.output_dataset_path)
@@ -967,6 +1064,9 @@ def main():
         print(f"Saved value-map figure to {args.value_map_path}")
         print(f"Saved embedding data to {os.path.splitext(args.value_map_path)[0]}_embedding.npz")
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
     if args.value_graph_html_path:
         save_value_graph_viewer(
             dataset,
@@ -980,6 +1080,12 @@ def main():
     if video_path:
         print(f"Saved rollout video to {video_path}")
 
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
 
 if __name__ == "__main__":
     main()
