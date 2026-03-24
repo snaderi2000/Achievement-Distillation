@@ -319,6 +319,9 @@ def save_value_graph_viewer(
       flex-direction: column;
       gap: 14px;
       background: linear-gradient(180deg, rgba(255,255,255,0.42), rgba(248,242,231,0.88));
+      height: 100vh;
+      overflow-y: auto;
+      overflow-x: hidden;
     }}
     .card {{
       background: var(--panel);
