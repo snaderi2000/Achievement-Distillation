@@ -1,29 +1,10 @@
 import argparse
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
 import base64
 import importlib
 import json
 import os
 import random
 from typing import Dict, List, Optional, Sequence, Tuple
-=======
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-import importlib
-import os
-import random
-from typing import Dict, List
-<<<<<<< ours
-<<<<<<< ours
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
 
 import numpy as np
 import torch as th
@@ -86,10 +67,6 @@ def pca_2d(latents: np.ndarray) -> np.ndarray:
     components = vh[:2].T
     return centered @ components
 
-
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
 def observation_to_uint8_hwc(observation: th.Tensor) -> np.ndarray:
     obs = observation.detach().cpu().numpy()
     if obs.ndim != 3:
@@ -260,6 +237,7 @@ def save_value_graph_viewer(
             "value_threshold": None if value_threshold is None else float(value_threshold),
             "num_neighbors": int(num_neighbors),
             "max_states": None if max_states is None else int(max_states),
+            "reward_nodes": int(np.count_nonzero(np.abs(rewards) > 1e-8)),
         },
         "nodes": nodes,
         "edges": {
@@ -381,6 +359,47 @@ def save_value_graph_viewer(
       color: #4a5d4d;
       line-height: 1.5;
     }}
+    .controls {{
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      font-size: 13px;
+      color: #3e4e40;
+    }}
+    .controls label {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }}
+    .controls input[type="text"] {{
+      width: 100%;
+      padding: 9px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(34, 49, 39, 0.14);
+      background: rgba(255, 252, 246, 0.95);
+      color: var(--ink);
+      font: inherit;
+    }}
+    .button-row {{
+      display: flex;
+      gap: 8px;
+    }}
+    .button-row button {{
+      border: 0;
+      border-radius: 999px;
+      padding: 8px 12px;
+      font: inherit;
+      background: #e2d4bb;
+      color: #36483a;
+      cursor: pointer;
+    }}
+    .button-row button:hover {{
+      background: #d6c4a6;
+    }}
+    .status {{
+      min-height: 18px;
+      color: #6c533f;
+    }}
     .task-list {{
       font-size: 13px;
       color: #3e4e40;
@@ -433,7 +452,20 @@ def save_value_graph_viewer(
           <div><strong>Value Range</strong><span id="meta-range"></span></div>
           <div><strong>Value Threshold</strong><span id="meta-threshold"></span></div>
           <div><strong>Neighbors Per Node</strong><span id="meta-neighbors"></span></div>
+          <div><strong>Reward States</strong><span id="meta-rewards"></span></div>
         </div>
+      </section>
+      <section class="card controls">
+        <label><input id="reward-ring-toggle" type="checkbox" checked> Show reward-state rings</label>
+        <div>
+          <strong style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#66806a;margin-bottom:6px;">Step Highlight</strong>
+          <input id="step-range-input" type="text" placeholder="e.g. 181-187 or 42">
+        </div>
+        <div class="button-row">
+          <button id="apply-step-range" type="button">Highlight</button>
+          <button id="clear-step-range" type="button">Clear</button>
+        </div>
+        <div id="step-range-status" class="status">No step range highlighted.</div>
       </section>
       <section class="card preview-wrap">
         <canvas id="preview" class="preview-canvas" width="320" height="320"></canvas>
@@ -454,6 +486,8 @@ def save_value_graph_viewer(
         <div class="legend-row"><span class="swatch" style="background:#768b78;"></span><span>Temporal rollout edges</span></div>
         <div class="legend-row"><span class="swatch" style="background:#ca7f45;"></span><span>Value-neighbor edges</span></div>
         <div class="legend-row"><span class="swatch" style="background:linear-gradient(90deg,#2c7c7a,#e8c15a,#c95c34);height:10px;"></span><span>Node color tracks predicted value</span></div>
+        <div class="legend-row"><span class="swatch" style="background:#caa24a;height:10px;"></span><span>Reward-state ring</span></div>
+        <div class="legend-row"><span class="swatch" style="background:#2d3441;height:10px;"></span><span>Step-range highlight</span></div>
       </section>
       <section class="card hint">
         Graph settings: states are arranged by predicted value on concentric rings, temporal edges connect adjacent rollout states, and value-neighbor edges connect each node to its nearest states in value space subject to the threshold shown above.
@@ -478,6 +512,11 @@ def save_value_graph_viewer(
     const nodeAction = document.getElementById("node-action");
     const nodeDone = document.getElementById("node-done");
     const nodeTasks = document.getElementById("node-tasks");
+    const rewardRingToggle = document.getElementById("reward-ring-toggle");
+    const stepRangeInput = document.getElementById("step-range-input");
+    const stepRangeStatus = document.getElementById("step-range-status");
+    const applyStepRangeButton = document.getElementById("apply-step-range");
+    const clearStepRangeButton = document.getElementById("clear-step-range");
 
     document.getElementById("meta-nodes").textContent = DATA.meta.num_nodes;
     document.getElementById("meta-temporal").textContent = DATA.meta.num_temporal_edges;
@@ -485,6 +524,7 @@ def save_value_graph_viewer(
     document.getElementById("meta-range").textContent = `${{DATA.meta.value_min.toFixed(2)}} to ${{DATA.meta.value_max.toFixed(2)}}`;
     document.getElementById("meta-threshold").textContent = DATA.meta.value_threshold === null ? "none" : DATA.meta.value_threshold.toFixed(3);
     document.getElementById("meta-neighbors").textContent = String(DATA.meta.num_neighbors);
+    document.getElementById("meta-rewards").textContent = String(DATA.meta.reward_nodes);
 
     let dpr = window.devicePixelRatio || 1;
     let transform = {{
@@ -498,6 +538,7 @@ def save_value_graph_viewer(
     let lastMouse = null;
     let hoveredNode = null;
     let pinnedNode = null;
+    let activeStepRange = null;
 
     const adjacency = new Map();
     function registerEdge(a, b, type) {{
@@ -550,6 +591,38 @@ def save_value_graph_viewer(
       return `hsl(${{hue}}, ${{sat}}%, ${{light}}%)`;
     }}
 
+    function hasReward(node) {{
+      return Math.abs(node.reward) > 1e-8;
+    }}
+
+    function isInActiveStepRange(node) {{
+      if (!activeStepRange) {{
+        return false;
+      }}
+      return node.step_id >= activeStepRange.start && node.step_id <= activeStepRange.end;
+    }}
+
+    function updateStepRangeStatus(message) {{
+      stepRangeStatus.textContent = message;
+    }}
+
+    function parseStepRange(text) {{
+      const cleaned = text.trim();
+      if (!cleaned) {{
+        return null;
+      }}
+      const match = cleaned.match(/^(\\d+)(?:\\s*-\\s*(\\d+))?$/);
+      if (!match) {{
+        return "invalid";
+      }}
+      const start = Number(match[1]);
+      const end = match[2] ? Number(match[2]) : start;
+      return {{
+        start: Math.min(start, end),
+        end: Math.max(start, end),
+      }};
+    }}
+
     function worldToScreen(x, y) {{
       return {{
         x: x * transform.scale + transform.offsetX,
@@ -588,9 +661,23 @@ def save_value_graph_viewer(
       ctx.globalAlpha = 1.0;
     }}
 
-    function drawNode(node, isHovered, isPinned, isNeighbor) {{
+    function drawNode(node, isHovered, isPinned, isNeighbor, hasRewardRing, inStepRange) {{
       const p = worldToScreen(node.x, node.y);
       const radius = isPinned ? 8.5 : isHovered ? 7.5 : isNeighbor ? 6.8 : 5.8;
+      if (inStepRange) {{
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, radius + 6.5, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(45, 52, 65, 0.92)";
+        ctx.lineWidth = 3.2;
+        ctx.stroke();
+      }}
+      if (hasRewardRing) {{
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, radius + (inStepRange ? 11 : 6.5), 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(202, 162, 74, 0.95)";
+        ctx.lineWidth = 2.4;
+        ctx.stroke();
+      }}
       ctx.beginPath();
       ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
       ctx.fillStyle = valueColor(node.value);
@@ -630,6 +717,8 @@ def save_value_graph_viewer(
           hoveredNode && node.id === hoveredNode.id,
           pinnedNode && node.id === pinnedNode.id,
           focusNode ? highlighted.has(node.id) && node.id !== focusNode.id : false,
+          rewardRingToggle.checked && hasReward(node),
+          isInActiveStepRange(node),
         );
       }}
     }}
@@ -787,6 +876,42 @@ def save_value_graph_viewer(
       }}
     }});
 
+    rewardRingToggle.addEventListener("change", () => {{
+      draw();
+    }});
+
+    applyStepRangeButton.addEventListener("click", () => {{
+      const parsed = parseStepRange(stepRangeInput.value);
+      if (parsed === "invalid") {{
+        activeStepRange = null;
+        updateStepRangeStatus("Use a single step like 42 or a range like 181-187.");
+        draw();
+        return;
+      }}
+      if (parsed === null) {{
+        activeStepRange = null;
+        updateStepRangeStatus("No step range highlighted.");
+        draw();
+        return;
+      }}
+      activeStepRange = parsed;
+      updateStepRangeStatus(`Highlighting steps ${{parsed.start}}-${{parsed.end}}.`);
+      draw();
+    }});
+
+    clearStepRangeButton.addEventListener("click", () => {{
+      activeStepRange = null;
+      stepRangeInput.value = "";
+      updateStepRangeStatus("No step range highlighted.");
+      draw();
+    }});
+
+    stepRangeInput.addEventListener("keydown", (event) => {{
+      if (event.key === "Enter") {{
+        applyStepRangeButton.click();
+      }}
+    }});
+
     renderPreview(null);
     resizeCanvas();
     window.addEventListener("resize", resizeCanvas);
@@ -808,26 +933,11 @@ def collect_value_dataset(
 ) -> Tuple[Dict[str, th.Tensor], Optional[str]]:
     from crafter.env import Env
     from crafter.recorder import VideoRecorder
-=======
-def collect_value_dataset(model, device: th.device, num_episodes: int, eval_seed: int) -> Dict[str, th.Tensor]:
-    from crafter.env import Env
->>>>>>> theirs
-=======
-def collect_value_dataset(model, device: th.device, num_episodes: int, eval_seed: int) -> Dict[str, th.Tensor]:
-    from crafter.env import Env
->>>>>>> theirs
-=======
-def collect_value_dataset(model, device: th.device, num_episodes: int, eval_seed: int) -> Dict[str, th.Tensor]:
-    from crafter.env import Env
->>>>>>> theirs
     from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
 
     from achievement_distillation.constant import TASKS
     from achievement_distillation.wrapper import VecPyTorch
 
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
     latest_video_path = None
 
     def make_env():
@@ -837,15 +947,6 @@ def collect_value_dataset(model, device: th.device, num_episodes: int, eval_seed
         return env
 
     venv = DummyVecEnv([make_env])
-=======
-    venv = DummyVecEnv([lambda: Env(seed=eval_seed)])
->>>>>>> theirs
-=======
-    venv = DummyVecEnv([lambda: Env(seed=eval_seed)])
->>>>>>> theirs
-=======
-    venv = DummyVecEnv([lambda: Env(seed=eval_seed)])
->>>>>>> theirs
     venv = VecPyTorch(venv, device=device)
 
     observations: List[th.Tensor] = []
@@ -892,18 +993,8 @@ def collect_value_dataset(model, device: th.device, num_episodes: int, eval_seed
             done = bool(done_tensor.item())
             step_idx += 1
 
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
         if video_directory:
             latest_video_path = find_latest_mp4(video_directory)
-
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
     venv.close()
 
     dataset = {
@@ -919,19 +1010,7 @@ def collect_value_dataset(model, device: th.device, num_episodes: int, eval_seed
         "step_ids": th.tensor(step_ids, dtype=th.long),
         "task_names": TASKS,
     }
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
     return dataset, latest_video_path
-=======
-    return dataset
->>>>>>> theirs
-=======
-    return dataset
->>>>>>> theirs
-=======
-    return dataset
->>>>>>> theirs
 
 
 def save_value_map(dataset: Dict[str, th.Tensor], output_path: str, max_points: int = 5000):
@@ -990,20 +1069,11 @@ def main():
     parser.add_argument("--output_dataset_path", type=str, default="value_dataset.pt")
     parser.add_argument("--value_map_path", type=str, default=None)
     parser.add_argument("--value_map_max_points", type=int, default=5000)
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
     parser.add_argument("--value_graph_html_path", type=str, default=None)
     parser.add_argument("--value_graph_max_states", type=int, default=400)
     parser.add_argument("--value_graph_num_neighbors", type=int, default=4)
     parser.add_argument("--value_graph_value_threshold", type=float, default=None)
     parser.add_argument("--episode_video_dir", type=str, default=None)
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
     args = parser.parse_args()
 
     device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
@@ -1020,33 +1090,12 @@ def main():
     print(f"Loaded checkpoint: {ckpt_path}")
     print(f"Using device: {device}")
 
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
     dataset, video_path = collect_value_dataset(
-=======
-    dataset = collect_value_dataset(
->>>>>>> theirs
-=======
-    dataset = collect_value_dataset(
->>>>>>> theirs
-=======
-    dataset = collect_value_dataset(
->>>>>>> theirs
         model=model,
         device=device,
         num_episodes=args.num_episodes,
         eval_seed=args.eval_seed,
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
         video_directory=args.episode_video_dir,
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
     )
 
     th.save(dataset, args.output_dataset_path)
@@ -1064,9 +1113,6 @@ def main():
         print(f"Saved value-map figure to {args.value_map_path}")
         print(f"Saved embedding data to {os.path.splitext(args.value_map_path)[0]}_embedding.npz")
 
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
     if args.value_graph_html_path:
         save_value_graph_viewer(
             dataset,
@@ -1079,13 +1125,6 @@ def main():
 
     if video_path:
         print(f"Saved rollout video to {video_path}")
-
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
 
 if __name__ == "__main__":
     main()
