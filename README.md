@@ -79,7 +79,7 @@ python collect_value_map.py \
   --episode_video_dir videos/value-graph-demo
 ```
 
-Open `value_graph.html` in a browser to pan, zoom, hover over nodes, and click a state to pin and enlarge its image. The viewer also shows the value-neighbor settings you used to build the graph, can ring states with non-zero rewards, and lets you highlight a step range like `181-187` from the sidebar. If `--episode_video_dir` is set, the rollout is recorded to an `.mp4` in that directory so you can pair the graph with the full episode video.
+Open `value_graph.html` in a browser to pan, zoom, hover over nodes, and click a state to pin and enlarge its image. The viewer also shows the value-neighbor settings you used to build the graph, can ring states with non-zero rewards, highlights first-time achievement unlock steps, shows human-readable action names, and lets you highlight a step range like `181-187` from the sidebar. If `--episode_video_dir` is set, the rollout is recorded to an `.mp4` in that directory so you can pair the graph with the full episode video.
 
 =======
 >>>>>>> theirs

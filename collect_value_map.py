@@ -10,6 +10,26 @@ import numpy as np
 import torch as th
 import yaml
 
+ACTION_NAMES = [
+    "noop",
+    "left",
+    "right",
+    "up",
+    "down",
+    "grab_or_attack",
+    "sleep",
+    "place_table",
+    "place_stone",
+    "place_furnace",
+    "place_plant",
+    "make_wood_pickaxe",
+    "make_stone_pickaxe",
+    "make_iron_pickaxe",
+    "make_wood_sword",
+    "make_stone_sword",
+    "make_iron_sword",
+]
+
 
 def load_config(exp_name: str) -> Dict:
     config_path = f"configs/{exp_name}.yaml"
@@ -173,6 +193,29 @@ def find_latest_mp4(directory: str) -> Optional[str]:
     return candidates[-1]
 
 
+def compute_first_unlocks(
+    successes: np.ndarray,
+    episode_ids: np.ndarray,
+    task_names: Sequence[str],
+) -> List[List[str]]:
+    first_unlocks: List[List[str]] = []
+    prev_success = None
+    prev_episode = None
+    for idx in range(len(successes)):
+        current_success = successes[idx].astype(bool)
+        if prev_success is None or prev_episode != int(episode_ids[idx]):
+            previous = np.zeros_like(current_success, dtype=bool)
+        else:
+            previous = prev_success
+        new_unlock_mask = np.logical_and(current_success, np.logical_not(previous))
+        first_unlocks.append(
+            [task_names[task_idx] for task_idx in np.where(new_unlock_mask)[0].tolist()]
+        )
+        prev_success = current_success
+        prev_episode = int(episode_ids[idx])
+    return first_unlocks
+
+
 def save_value_graph_viewer(
     dataset: Dict[str, th.Tensor],
     output_path: str,
@@ -196,6 +239,9 @@ def save_value_graph_viewer(
     task_names: Sequence[str] = dataset["task_names"]
     achievements = dataset["achievements"][selected_idx].cpu().numpy()
     successes = dataset["successes"][selected_idx].cpu().numpy()
+    full_episode_ids = dataset["episode_ids"].cpu().numpy()
+    full_successes = dataset["successes"].cpu().numpy()
+    full_first_unlocks = compute_first_unlocks(full_successes, full_episode_ids, task_names)
 
     value_min = float(values.min()) if len(values) else 0.0
     value_max = float(values.max()) if len(values) else 1.0
@@ -219,10 +265,12 @@ def save_value_graph_viewer(
                 "done": bool(dones[idx]),
                 "episode_id": int(episode_ids[idx]),
                 "step_id": int(step_ids[idx]),
+                "action_name": ACTION_NAMES[int(actions[idx])] if 0 <= int(actions[idx]) < len(ACTION_NAMES) else f"action_{int(actions[idx])}",
                 "image_bytes": image_bytes,
                 "image_width": int(width),
                 "image_height": int(height),
                 "achieved_tasks": achieved,
+                "new_achievements": full_first_unlocks[int(selected_idx[idx])],
                 "achievement_counts": achievements[idx].tolist(),
             }
         )
@@ -238,6 +286,8 @@ def save_value_graph_viewer(
             "num_neighbors": int(num_neighbors),
             "max_states": None if max_states is None else int(max_states),
             "reward_nodes": int(np.count_nonzero(np.abs(rewards) > 1e-8)),
+            "first_unlock_nodes": int(sum(1 for unlocks in full_first_unlocks if unlocks)),
+            "action_names": ACTION_NAMES,
         },
         "nodes": nodes,
         "edges": {
@@ -456,10 +506,18 @@ def save_value_graph_viewer(
           <div><strong>Value Threshold</strong><span id="meta-threshold"></span></div>
           <div><strong>Neighbors Per Node</strong><span id="meta-neighbors"></span></div>
           <div><strong>Reward States</strong><span id="meta-rewards"></span></div>
+          <div><strong>First Unlocks</strong><span id="meta-first-unlocks"></span></div>
+          <div><strong>Action Matches</strong><span id="meta-action-matches">none</span></div>
         </div>
       </section>
       <section class="card controls">
         <label><input id="reward-ring-toggle" type="checkbox" checked> Show reward-state rings</label>
+        <div>
+          <strong style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#66806a;margin-bottom:6px;">Action Highlight</strong>
+          <select id="action-filter-select" style="width:100%;padding:9px 10px;border-radius:10px;border:1px solid rgba(34, 49, 39, 0.14);background:rgba(255, 252, 246, 0.95);color:#223127;font:inherit;">
+            <option value="">No action filter</option>
+          </select>
+        </div>
         <div>
           <strong style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#66806a;margin-bottom:6px;">Step Highlight</strong>
           <input id="step-range-input" type="text" placeholder="e.g. 181-187 or 42">
@@ -481,6 +539,10 @@ def save_value_graph_viewer(
           <div><strong>Done</strong><span id="node-done">-</span></div>
         </div>
         <div>
+          <strong style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#66806a;margin-bottom:6px;">New Achievements At Step</strong>
+          <div id="node-new-tasks" class="task-list">No new achievements at this step.</div>
+        </div>
+        <div>
           <strong style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#66806a;margin-bottom:6px;">Achievements Unlocked</strong>
           <div id="node-tasks" class="task-list">Hover a node to inspect its state.</div>
         </div>
@@ -491,6 +553,8 @@ def save_value_graph_viewer(
         <div class="legend-row"><span class="swatch" style="background:linear-gradient(90deg,#2c7c7a,#e8c15a,#c95c34);height:10px;"></span><span>Node color tracks predicted value</span></div>
         <div class="legend-row"><span class="swatch" style="background:#caa24a;height:10px;"></span><span>Reward-state ring</span></div>
         <div class="legend-row"><span class="swatch" style="background:#2d3441;height:10px;"></span><span>Step-range highlight</span></div>
+        <div class="legend-row"><span class="swatch" style="background:#b5524f;height:10px;"></span><span>First-time achievement unlock</span></div>
+        <div class="legend-row"><span class="swatch" style="background:#5b4fa8;height:10px;"></span><span>Selected action highlight</span></div>
       </section>
       <section class="card hint">
         Graph settings: states are arranged by predicted value on concentric rings, temporal edges connect adjacent rollout states, and value-neighbor edges connect each node to its nearest states in value space subject to the threshold shown above.
@@ -514,12 +578,15 @@ def save_value_graph_viewer(
     const nodeReward = document.getElementById("node-reward");
     const nodeAction = document.getElementById("node-action");
     const nodeDone = document.getElementById("node-done");
+    const nodeNewTasks = document.getElementById("node-new-tasks");
     const nodeTasks = document.getElementById("node-tasks");
     const rewardRingToggle = document.getElementById("reward-ring-toggle");
+    const actionFilterSelect = document.getElementById("action-filter-select");
     const stepRangeInput = document.getElementById("step-range-input");
     const stepRangeStatus = document.getElementById("step-range-status");
     const applyStepRangeButton = document.getElementById("apply-step-range");
     const clearStepRangeButton = document.getElementById("clear-step-range");
+    const actionMatchMeta = document.getElementById("meta-action-matches");
 
     document.getElementById("meta-nodes").textContent = DATA.meta.num_nodes;
     document.getElementById("meta-temporal").textContent = DATA.meta.num_temporal_edges;
@@ -528,6 +595,13 @@ def save_value_graph_viewer(
     document.getElementById("meta-threshold").textContent = DATA.meta.value_threshold === null ? "none" : DATA.meta.value_threshold.toFixed(3);
     document.getElementById("meta-neighbors").textContent = String(DATA.meta.num_neighbors);
     document.getElementById("meta-rewards").textContent = String(DATA.meta.reward_nodes);
+    document.getElementById("meta-first-unlocks").textContent = String(DATA.meta.first_unlock_nodes);
+    for (const actionName of DATA.meta.action_names) {{
+      const option = document.createElement("option");
+      option.value = actionName;
+      option.textContent = actionName;
+      actionFilterSelect.appendChild(option);
+    }}
 
     let dpr = window.devicePixelRatio || 1;
     let transform = {{
@@ -542,6 +616,7 @@ def save_value_graph_viewer(
     let hoveredNode = null;
     let pinnedNode = null;
     let activeStepRange = null;
+    let activeActionFilter = "";
 
     const adjacency = new Map();
     function registerEdge(a, b, type) {{
@@ -598,6 +673,10 @@ def save_value_graph_viewer(
       return Math.abs(node.reward) > 1e-8;
     }}
 
+    function hasNewAchievement(node) {{
+      return node.new_achievements && node.new_achievements.length > 0;
+    }}
+
     function isInActiveStepRange(node) {{
       if (!activeStepRange) {{
         return false;
@@ -607,6 +686,15 @@ def save_value_graph_viewer(
 
     function updateStepRangeStatus(message) {{
       stepRangeStatus.textContent = message;
+    }}
+
+    function updateActionMatchStatus() {{
+      if (!activeActionFilter) {{
+        actionMatchMeta.textContent = "none";
+        return;
+      }}
+      const matchCount = DATA.nodes.filter((node) => node.action_name === activeActionFilter).length;
+      actionMatchMeta.textContent = `${{matchCount}} (${{activeActionFilter}})`;
     }}
 
     function parseStepRange(text) {{
@@ -664,7 +752,7 @@ def save_value_graph_viewer(
       ctx.globalAlpha = 1.0;
     }}
 
-    function drawNode(node, isHovered, isPinned, isNeighbor, hasRewardRing, inStepRange) {{
+    function drawNode(node, isHovered, isPinned, isNeighbor, hasRewardRing, inStepRange, isFirstUnlock, actionMatched) {{
       const p = worldToScreen(node.x, node.y);
       const radius = isPinned ? 8.5 : isHovered ? 7.5 : isNeighbor ? 6.8 : 5.8;
       if (inStepRange) {{
@@ -681,9 +769,23 @@ def save_value_graph_viewer(
         ctx.lineWidth = 2.4;
         ctx.stroke();
       }}
+      if (isFirstUnlock) {{
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, radius + (hasRewardRing ? 15 : 10), 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(181, 82, 79, 0.96)";
+        ctx.lineWidth = 3.2;
+        ctx.stroke();
+      }}
+      if (actionMatched) {{
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, radius + 18.5, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(91, 79, 168, 0.92)";
+        ctx.lineWidth = 2.8;
+        ctx.stroke();
+      }}
       ctx.beginPath();
       ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = valueColor(node.value);
+      ctx.fillStyle = isFirstUnlock ? "#b5524f" : valueColor(node.value);
       ctx.fill();
       if (isHovered || isPinned) {{
         ctx.lineWidth = 2.2;
@@ -722,6 +824,8 @@ def save_value_graph_viewer(
           focusNode ? highlighted.has(node.id) && node.id !== focusNode.id : false,
           rewardRingToggle.checked && hasReward(node),
           isInActiveStepRange(node),
+          hasNewAchievement(node),
+          activeActionFilter && node.action_name === activeActionFilter,
         );
       }}
     }}
@@ -751,6 +855,7 @@ def save_value_graph_viewer(
         nodeReward.textContent = "-";
         nodeAction.textContent = "-";
         nodeDone.textContent = "-";
+        nodeNewTasks.textContent = "No new achievements at this step.";
         nodeTasks.textContent = "Hover a node to inspect its state.";
         return;
       }}
@@ -774,8 +879,9 @@ def save_value_graph_viewer(
       nodeStep.textContent = String(node.step_id);
       nodeValue.textContent = node.value.toFixed(3);
       nodeReward.textContent = node.reward.toFixed(3);
-      nodeAction.textContent = String(node.action);
+      nodeAction.textContent = node.action_name;
       nodeDone.textContent = node.done ? "yes" : "no";
+      nodeNewTasks.textContent = node.new_achievements.length ? node.new_achievements.join(", ") : "No new achievements at this step.";
       nodeTasks.textContent = node.achieved_tasks.length ? node.achieved_tasks.join(", ") : "No achievements unlocked yet.";
     }}
 
@@ -883,6 +989,12 @@ def save_value_graph_viewer(
       draw();
     }});
 
+    actionFilterSelect.addEventListener("change", () => {{
+      activeActionFilter = actionFilterSelect.value;
+      updateActionMatchStatus();
+      draw();
+    }});
+
     applyStepRangeButton.addEventListener("click", () => {{
       const parsed = parseStepRange(stepRangeInput.value);
       if (parsed === "invalid") {{
@@ -916,6 +1028,7 @@ def save_value_graph_viewer(
     }});
 
     renderPreview(null);
+    updateActionMatchStatus();
     resizeCanvas();
     window.addEventListener("resize", resizeCanvas);
   </script>
