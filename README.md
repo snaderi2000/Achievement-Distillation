@@ -88,6 +88,7 @@ python analyze_counterfactual_inventory_variance.py \
   --episode_id 0 \
   --base_step 35 \
   --num_steps 10 \
+  --use_crafter_layout \
   --output_dir counterfactual_inventory_base35
 ```
 

@@ -7,6 +7,7 @@ import numpy as np
 import torch as th
 
 from collect_value_map import load_model, set_seed
+from crafter import constants as crafter_constants
 
 
 def select_evenly_spaced_indices(num_points: int, target_count: int) -> np.ndarray:
@@ -90,33 +91,17 @@ def swap_world_rows(base_obs: th.Tensor, donor_obs: th.Tensor, inventory_rows: i
     return hybrid
 
 
-def detect_inventory_rows(observation: th.Tensor, darkness_threshold: float = 0.08) -> int:
-    image = observation.detach().cpu()
-    if image.ndim != 3:
-        raise ValueError(f"Expected CHW observation, got shape {tuple(image.shape)}")
-
-    row_mean = image.mean(dim=(0, 2)).numpy()
-    dark_rows = row_mean < darkness_threshold
-    if not np.any(dark_rows):
-        raise ValueError("Could not detect HUD boundary from observation; no dark HUD rows found.")
-
-    height = image.shape[1]
-    start_row = None
-    for row_idx in range(height - 1, -1, -1):
-        if dark_rows[row_idx]:
-            start_row = row_idx
-        elif start_row is not None:
-            break
-
-    if start_row is None:
-        raise ValueError("Failed to infer HUD start row.")
-
-    inventory_rows = height - start_row
-    if inventory_rows <= 0 or inventory_rows >= height:
+def crafter_inventory_rows(size=(64, 64), view=(9, 9)) -> int:
+    view = np.array(view if hasattr(view, "__len__") else (view, view))
+    size = np.array(size if hasattr(size, "__len__") else (size, size))
+    unit = size // view
+    item_rows = int(np.ceil(len(crafter_constants.items) / view[0]))
+    inventory_rows = int(item_rows * unit[1])
+    if inventory_rows <= 0 or inventory_rows >= size[1]:
         raise ValueError(
-            f"Detected invalid HUD height {inventory_rows} for observation height {height}."
+            f"Invalid Crafter HUD height {inventory_rows} for size={tuple(size)} and view={tuple(view)}."
         )
-    return int(inventory_rows)
+    return inventory_rows
 
 
 def observation_to_hwc(obs: th.Tensor) -> np.ndarray:
@@ -347,9 +332,9 @@ def main():
     )
     parser.add_argument("--inventory_rows", type=int, default=16)
     parser.add_argument(
-        "--auto_detect_hud",
+        "--use_crafter_layout",
         action="store_true",
-        help="Infer the HUD/inventory split from the observation instead of using --inventory_rows.",
+        help="Use the exact Crafter render geometry for the HUD split instead of --inventory_rows.",
     )
     parser.add_argument("--output_dir", type=str, default="counterfactual_inventory_analysis")
     args = parser.parse_args()
@@ -394,7 +379,7 @@ def main():
         base_idx = find_dataset_index(dataset, args.episode_id, args.base_step)
         base_obs = observations[base_idx]
         base_value = evaluate_value(model, base_obs, device)
-        inventory_rows = detect_inventory_rows(base_obs) if args.auto_detect_hud else args.inventory_rows
+        inventory_rows = crafter_inventory_rows() if args.use_crafter_layout else args.inventory_rows
         donor_values = []
         inventory_swap_values = []
         world_swap_values = []
@@ -442,7 +427,7 @@ def main():
             "variance_world_swap_values": float(np.var(world_swap_values)),
             "variance_donor_values": float(np.var(donor_values)),
             "inventory_rows": int(inventory_rows),
-            "auto_detect_hud": bool(args.auto_detect_hud),
+            "use_crafter_layout": bool(args.use_crafter_layout),
         }
 
         save_dual_fixed_base_figure(
@@ -481,7 +466,7 @@ def main():
     selected_steps = dataset["step_ids"][selected_indices].cpu().numpy().tolist()
     print(f"Selected steps: {selected_steps}")
     inventory_rows = (
-        detect_inventory_rows(observations[selected_indices[0]]) if args.auto_detect_hud else args.inventory_rows
+        crafter_inventory_rows() if args.use_crafter_layout else args.inventory_rows
     )
     print(f"HUD rows used: {inventory_rows}")
 
@@ -509,7 +494,7 @@ def main():
         "row_variances": row_vars.tolist(),
         "col_variances": col_vars.tolist(),
         "inventory_rows": int(inventory_rows),
-        "auto_detect_hud": bool(args.auto_detect_hud),
+        "use_crafter_layout": bool(args.use_crafter_layout),
         "value_matrix": value_matrix.tolist(),
     }
 
