@@ -77,21 +77,21 @@ python collect_value_map.py \
 
 Open `value_graph.html` in a browser to pan, zoom, hover over nodes, and click a state to pin and enlarge its image. The viewer also shows the value-neighbor settings you used to build the graph, can ring states with non-zero rewards, highlights first-time achievement unlock steps, shows human-readable action names, and lets you highlight a step range like `181-187` from the sidebar. If `--episode_video_dir` is set, the rollout is recorded to an `.mp4` in that directory so you can pair the graph with the full episode video.
 
-To do a simple counterfactual inventory probe on a saved rollout, you can swap the bottom inventory HUD rows from one step into another and re-evaluate the value function:
+To probe a fixed base state against several donor inventories, you can use the same analysis script with `--base_step`:
 
 ```bash
-python probe_counterfactual_inventory.py \
+python analyze_counterfactual_inventory_variance.py \
   --dataset_path value_dataset.pt \
   --exp_name ppo \
   --timestamp <timestamp> \
   --train_seed 0 \
   --episode_id 0 \
   --base_step 35 \
-  --donor_steps 100,200,300,389 \
-  --figure_dir counterfactual_figures
+  --num_steps 10 \
+  --output_dir counterfactual_inventory_base35
 ```
 
-This is an image-space intervention on the observation, not a full simulator-state edit, so it is best interpreted as “what does the critic do when the visible inventory panel changes?” rather than a perfect environment-level counterfactual.
+You can also pass explicit donor steps with `--donor_steps 100,200,300,389`. This is an image-space intervention on the observation, not a full simulator-state edit, so it is best interpreted as “what does the critic do when the visible inventory panel changes?” rather than a perfect environment-level counterfactual.
 
 For a crude variance comparison over evenly spaced points in one episode, you can also build a square counterfactual matrix where rows fix the base/world state and columns vary the swapped inventory:
 

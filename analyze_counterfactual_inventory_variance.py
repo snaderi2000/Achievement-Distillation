@@ -1,13 +1,12 @@
 import argparse
 import json
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch as th
 
 from collect_value_map import load_model, set_seed
-from probe_counterfactual_inventory import evaluate_value, swap_inventory_rows
 
 
 def select_evenly_spaced_indices(num_points: int, target_count: int) -> np.ndarray:
@@ -20,6 +19,20 @@ def select_evenly_spaced_indices(num_points: int, target_count: int) -> np.ndarr
     return np.unique(np.linspace(0, num_points - 1, num=target_count, dtype=np.int64))
 
 
+def parse_donor_steps(text: Optional[str]) -> Optional[List[int]]:
+    if text is None:
+        return None
+    steps = []
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        steps.append(int(item))
+    if not steps:
+        raise ValueError("Expected at least one donor step in --donor_steps.")
+    return steps
+
+
 def get_episode_indices(dataset: Dict[str, th.Tensor], episode_id: int) -> np.ndarray:
     episode_ids = dataset["episode_ids"].cpu().numpy()
     step_ids = dataset["step_ids"].cpu().numpy()
@@ -28,6 +41,38 @@ def get_episode_indices(dataset: Dict[str, th.Tensor], episode_id: int) -> np.nd
         raise ValueError(f"No states found for episode {episode_id}.")
     order = np.argsort(step_ids[idx])
     return idx[order]
+
+
+def find_dataset_index(dataset: Dict[str, th.Tensor], episode_id: int, step_id: int) -> int:
+    episode_ids = dataset["episode_ids"]
+    step_ids = dataset["step_ids"]
+    matches = ((episode_ids == episode_id) & (step_ids == step_id)).nonzero(as_tuple=False).view(-1)
+    if len(matches) == 0:
+        raise ValueError(f"No state found for episode={episode_id}, step={step_id}.")
+    if len(matches) > 1:
+        raise ValueError(f"Multiple states found for episode={episode_id}, step={step_id}.")
+    return int(matches.item())
+
+
+def evaluate_value(model, observation: th.Tensor, device: th.device) -> float:
+    with th.no_grad():
+        outputs = model.act(observation.unsqueeze(0).to(device))
+    return float(outputs["vpreds"].item())
+
+
+def swap_inventory_rows(base_obs: th.Tensor, donor_obs: th.Tensor, inventory_rows: int) -> th.Tensor:
+    if inventory_rows <= 0:
+        raise ValueError("--inventory_rows must be positive.")
+    if base_obs.shape != donor_obs.shape:
+        raise ValueError(f"Observation shape mismatch: {tuple(base_obs.shape)} vs {tuple(donor_obs.shape)}")
+    if inventory_rows > base_obs.shape[1]:
+        raise ValueError(
+            f"inventory_rows={inventory_rows} exceeds observation height {base_obs.shape[1]}"
+        )
+
+    hybrid = base_obs.clone()
+    hybrid[:, -inventory_rows:, :] = donor_obs[:, -inventory_rows:, :]
+    return hybrid
 
 
 def observation_to_hwc(obs: th.Tensor) -> np.ndarray:
@@ -90,6 +135,45 @@ def save_heatmap(
     plt.close(fig)
 
 
+def save_fixed_base_figure(
+    base_obs: th.Tensor,
+    donor_observations: List[th.Tensor],
+    hybrid_observations: List[th.Tensor],
+    donor_steps: List[int],
+    base_step: int,
+    base_value: float,
+    donor_values: List[float],
+    hybrid_values: List[float],
+    output_path: str,
+):
+    plt = __import__("matplotlib.pyplot", fromlist=["plt"])
+
+    n = len(donor_steps)
+    fig, axes = plt.subplots(n, 3, figsize=(9.6, max(3.2 * n, 4.0)))
+    axes = np.atleast_2d(axes)
+
+    for row_idx in range(n):
+        axes[row_idx, 0].imshow(observation_to_hwc(base_obs))
+        axes[row_idx, 0].set_title(f"Base {base_step}\nvalue={base_value:.3f}", fontsize=10)
+        axes[row_idx, 1].imshow(observation_to_hwc(donor_observations[row_idx]))
+        axes[row_idx, 1].set_title(
+            f"Inventory {donor_steps[row_idx]}\nvalue={donor_values[row_idx]:.3f}",
+            fontsize=10,
+        )
+        axes[row_idx, 2].imshow(observation_to_hwc(hybrid_observations[row_idx]))
+        axes[row_idx, 2].set_title(
+            f"Hybrid\nvalue={hybrid_values[row_idx]:.3f}",
+            fontsize=10,
+        )
+        for col_idx in range(3):
+            axes[row_idx, col_idx].axis("off")
+
+    fig.suptitle("Fixed-base inventory swap analysis")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 def save_variance_figure(
     row_vars: np.ndarray,
     col_vars: np.ndarray,
@@ -114,9 +198,32 @@ def save_variance_figure(
     plt.close(fig)
 
 
+def save_fixed_base_value_plot(
+    donor_steps: List[int],
+    donor_values: List[float],
+    hybrid_values: List[float],
+    base_value: float,
+    output_path: str,
+):
+    plt = __import__("matplotlib.pyplot", fromlist=["plt"])
+
+    fig, ax = plt.subplots(figsize=(8.0, 4.4))
+    ax.plot(donor_steps, donor_values, marker="o", label="Original donor value")
+    ax.plot(donor_steps, hybrid_values, marker="o", label="Hybrid value")
+    ax.axhline(base_value, color="tab:red", linestyle="--", label=f"Base value ({base_value:.3f})")
+    ax.set_xlabel("Donor step")
+    ax.set_ylabel("Predicted value")
+    ax.set_title("Fixed-base counterfactual inventory values")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Compare value variability from base world state versus swapped inventory across evenly spaced episode steps."
+        description="Counterfactual inventory analysis for one episode: either a full square matrix or a fixed-base-step sweep."
     )
     parser.add_argument("--dataset_path", type=str, default="value_dataset.pt")
     parser.add_argument("--exp_name", type=str, required=True)
@@ -125,6 +232,13 @@ def main():
     parser.add_argument("--ckpt_epoch", type=int, default=250)
     parser.add_argument("--episode_id", type=int, default=0)
     parser.add_argument("--num_steps", type=int, default=10)
+    parser.add_argument("--base_step", type=int, default=None)
+    parser.add_argument(
+        "--donor_steps",
+        type=str,
+        default=None,
+        help="Optional comma-separated donor steps. If omitted, uses evenly spaced steps.",
+    )
     parser.add_argument("--inventory_rows", type=int, default=16)
     parser.add_argument("--output_dir", type=str, default="counterfactual_inventory_analysis")
     args = parser.parse_args()
@@ -138,9 +252,7 @@ def main():
 
     dataset = th.load(args.dataset_path, map_location="cpu")
     episode_indices = get_episode_indices(dataset, args.episode_id)
-    selected_positions = select_evenly_spaced_indices(len(episode_indices), args.num_steps)
-    selected_indices = episode_indices[selected_positions]
-    selected_steps = dataset["step_ids"][selected_indices].cpu().numpy().tolist()
+    donor_steps_arg = parse_donor_steps(args.donor_steps)
 
     model, _, ckpt_path = load_model(
         args.exp_name,
@@ -153,13 +265,95 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"Loaded checkpoint: {ckpt_path}")
     print(f"Using device: {device}")
+
+    observations = dataset["observations"]
+
+    if args.base_step is not None:
+        if donor_steps_arg is None:
+            selected_positions = select_evenly_spaced_indices(len(episode_indices), args.num_steps)
+            donor_indices = episode_indices[selected_positions]
+            donor_steps = dataset["step_ids"][donor_indices].cpu().numpy().tolist()
+        else:
+            donor_steps = donor_steps_arg
+            donor_indices = np.array(
+                [find_dataset_index(dataset, args.episode_id, donor_step) for donor_step in donor_steps],
+                dtype=np.int64,
+            )
+
+        base_idx = find_dataset_index(dataset, args.episode_id, args.base_step)
+        base_obs = observations[base_idx]
+        base_value = evaluate_value(model, base_obs, device)
+        donor_values = []
+        hybrid_values = []
+        donor_observations = []
+        hybrid_observations = []
+
+        print(f"Base step: {args.base_step}")
+        print(f"Selected donor steps: {donor_steps}")
+        print("")
+        print("donor_step\t donor_value\t hybrid_value\t delta")
+        for donor_step, donor_idx in zip(donor_steps, donor_indices.tolist()):
+            donor_obs = observations[donor_idx]
+            donor_value = evaluate_value(model, donor_obs, device)
+            hybrid_obs = swap_inventory_rows(base_obs, donor_obs, args.inventory_rows)
+            hybrid_value = evaluate_value(model, hybrid_obs, device)
+            delta = hybrid_value - base_value
+
+            donor_values.append(donor_value)
+            hybrid_values.append(hybrid_value)
+            donor_observations.append(donor_obs)
+            hybrid_observations.append(hybrid_obs)
+            print(f"{donor_step:9d}\t {donor_value:11.4f}\t {hybrid_value:11.4f}\t {delta:+.4f}")
+
+        summary = {
+            "mode": "fixed_base_step",
+            "base_step": int(args.base_step),
+            "base_value": float(base_value),
+            "donor_steps": donor_steps,
+            "donor_values": donor_values,
+            "hybrid_values": hybrid_values,
+            "deltas": [hybrid - base_value for hybrid in hybrid_values],
+            "variance_hybrid_values": float(np.var(hybrid_values)),
+            "variance_donor_values": float(np.var(donor_values)),
+            "inventory_rows": int(args.inventory_rows),
+        }
+
+        save_fixed_base_figure(
+            base_obs=base_obs,
+            donor_observations=donor_observations,
+            hybrid_observations=hybrid_observations,
+            donor_steps=donor_steps,
+            base_step=args.base_step,
+            base_value=base_value,
+            donor_values=donor_values,
+            hybrid_values=hybrid_values,
+            output_path=os.path.join(args.output_dir, "fixed_base_swaps.png"),
+        )
+        save_fixed_base_value_plot(
+            donor_steps=donor_steps,
+            donor_values=donor_values,
+            hybrid_values=hybrid_values,
+            base_value=base_value,
+            output_path=os.path.join(args.output_dir, "fixed_base_values.png"),
+        )
+        with open(os.path.join(args.output_dir, "summary.json"), "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+
+        print("")
+        print(f"Variance of donor values: {np.var(donor_values):.6f}")
+        print(f"Variance of hybrid values: {np.var(hybrid_values):.6f}")
+        print(f"Saved outputs to {args.output_dir}")
+        return
+
+    selected_positions = select_evenly_spaced_indices(len(episode_indices), args.num_steps)
+    selected_indices = episode_indices[selected_positions]
+    selected_steps = dataset["step_ids"][selected_indices].cpu().numpy().tolist()
     print(f"Selected steps: {selected_steps}")
 
     n = len(selected_indices)
     value_matrix = np.zeros((n, n), dtype=np.float64)
     original_values = np.zeros(n, dtype=np.float64)
 
-    observations = dataset["observations"]
     for row_idx, base_dataset_idx in enumerate(selected_indices):
         base_obs = observations[base_dataset_idx]
         original_values[row_idx] = evaluate_value(model, base_obs, device)
@@ -172,6 +366,7 @@ def main():
     col_vars = value_matrix.var(axis=0)
 
     summary = {
+        "mode": "square_matrix",
         "selected_steps": selected_steps,
         "original_values": original_values.tolist(),
         "mean_inventory_variance_fixed_state": float(row_vars.mean()),
