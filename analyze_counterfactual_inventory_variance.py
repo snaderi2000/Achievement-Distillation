@@ -90,6 +90,35 @@ def swap_world_rows(base_obs: th.Tensor, donor_obs: th.Tensor, inventory_rows: i
     return hybrid
 
 
+def detect_inventory_rows(observation: th.Tensor, darkness_threshold: float = 0.08) -> int:
+    image = observation.detach().cpu()
+    if image.ndim != 3:
+        raise ValueError(f"Expected CHW observation, got shape {tuple(image.shape)}")
+
+    row_mean = image.mean(dim=(0, 2)).numpy()
+    dark_rows = row_mean < darkness_threshold
+    if not np.any(dark_rows):
+        raise ValueError("Could not detect HUD boundary from observation; no dark HUD rows found.")
+
+    height = image.shape[1]
+    start_row = None
+    for row_idx in range(height - 1, -1, -1):
+        if dark_rows[row_idx]:
+            start_row = row_idx
+        elif start_row is not None:
+            break
+
+    if start_row is None:
+        raise ValueError("Failed to infer HUD start row.")
+
+    inventory_rows = height - start_row
+    if inventory_rows <= 0 or inventory_rows >= height:
+        raise ValueError(
+            f"Detected invalid HUD height {inventory_rows} for observation height {height}."
+        )
+    return int(inventory_rows)
+
+
 def observation_to_hwc(obs: th.Tensor) -> np.ndarray:
     return obs.detach().cpu().permute(1, 2, 0).numpy()
 
@@ -317,6 +346,11 @@ def main():
         help="Optional comma-separated donor steps. If omitted, uses evenly spaced steps.",
     )
     parser.add_argument("--inventory_rows", type=int, default=16)
+    parser.add_argument(
+        "--auto_detect_hud",
+        action="store_true",
+        help="Infer the HUD/inventory split from the observation instead of using --inventory_rows.",
+    )
     parser.add_argument("--output_dir", type=str, default="counterfactual_inventory_analysis")
     args = parser.parse_args()
 
@@ -360,6 +394,7 @@ def main():
         base_idx = find_dataset_index(dataset, args.episode_id, args.base_step)
         base_obs = observations[base_idx]
         base_value = evaluate_value(model, base_obs, device)
+        inventory_rows = detect_inventory_rows(base_obs) if args.auto_detect_hud else args.inventory_rows
         donor_values = []
         inventory_swap_values = []
         world_swap_values = []
@@ -369,14 +404,15 @@ def main():
 
         print(f"Base step: {args.base_step}")
         print(f"Selected donor steps: {donor_steps}")
+        print(f"HUD rows used: {inventory_rows}")
         print("")
         print("donor_step\t donor_value\t inv_swap\t delta_inv\t world_swap\t delta_world")
         for donor_step, donor_idx in zip(donor_steps, donor_indices.tolist()):
             donor_obs = observations[donor_idx]
             donor_value = evaluate_value(model, donor_obs, device)
-            inventory_swap_obs = swap_inventory_rows(base_obs, donor_obs, args.inventory_rows)
+            inventory_swap_obs = swap_inventory_rows(base_obs, donor_obs, inventory_rows)
             inventory_swap_value = evaluate_value(model, inventory_swap_obs, device)
-            world_swap_obs = swap_world_rows(base_obs, donor_obs, args.inventory_rows)
+            world_swap_obs = swap_world_rows(base_obs, donor_obs, inventory_rows)
             world_swap_value = evaluate_value(model, world_swap_obs, device)
             delta_inventory = inventory_swap_value - base_value
             delta_world = world_swap_value - base_value
@@ -405,7 +441,8 @@ def main():
             "variance_inventory_swap_values": float(np.var(inventory_swap_values)),
             "variance_world_swap_values": float(np.var(world_swap_values)),
             "variance_donor_values": float(np.var(donor_values)),
-            "inventory_rows": int(args.inventory_rows),
+            "inventory_rows": int(inventory_rows),
+            "auto_detect_hud": bool(args.auto_detect_hud),
         }
 
         save_dual_fixed_base_figure(
@@ -443,6 +480,10 @@ def main():
     selected_indices = episode_indices[selected_positions]
     selected_steps = dataset["step_ids"][selected_indices].cpu().numpy().tolist()
     print(f"Selected steps: {selected_steps}")
+    inventory_rows = (
+        detect_inventory_rows(observations[selected_indices[0]]) if args.auto_detect_hud else args.inventory_rows
+    )
+    print(f"HUD rows used: {inventory_rows}")
 
     n = len(selected_indices)
     value_matrix = np.zeros((n, n), dtype=np.float64)
@@ -453,7 +494,7 @@ def main():
         original_values[row_idx] = evaluate_value(model, base_obs, device)
         for col_idx, donor_dataset_idx in enumerate(selected_indices):
             donor_obs = observations[donor_dataset_idx]
-            hybrid_obs = swap_inventory_rows(base_obs, donor_obs, args.inventory_rows)
+            hybrid_obs = swap_inventory_rows(base_obs, donor_obs, inventory_rows)
             value_matrix[row_idx, col_idx] = evaluate_value(model, hybrid_obs, device)
 
     row_vars = value_matrix.var(axis=1)
@@ -467,7 +508,8 @@ def main():
         "mean_state_variance_fixed_inventory": float(col_vars.mean()),
         "row_variances": row_vars.tolist(),
         "col_variances": col_vars.tolist(),
-        "inventory_rows": int(args.inventory_rows),
+        "inventory_rows": int(inventory_rows),
+        "auto_detect_hud": bool(args.auto_detect_hud),
         "value_matrix": value_matrix.tolist(),
     }
 
