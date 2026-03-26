@@ -91,7 +91,11 @@ python analyze_counterfactual_inventory_variance.py \
   --output_dir counterfactual_inventory_base35
 ```
 
-You can also pass explicit donor steps with `--donor_steps 100,200,300,389`. This is an image-space intervention on the observation, not a full simulator-state edit, so it is best interpreted as “what does the critic do when the visible inventory panel changes?” rather than a perfect environment-level counterfactual.
+This fixed-step mode now reports both:
+- fixed world, swapped inventory
+- fixed inventory, swapped world
+
+You can also pass explicit donor steps with `--donor_steps 100,200,300,389`. This is an image-space intervention on the observation, not a full simulator-state edit, so it is best interpreted as “what does the critic do when the visible inventory panel changes?” or “when the visible world changes?” rather than a perfect environment-level counterfactual.
 
 For a crude variance comparison over evenly spaced points in one episode, you can also build a square counterfactual matrix where rows fix the base/world state and columns vary the swapped inventory:
 

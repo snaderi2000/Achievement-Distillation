@@ -75,6 +75,21 @@ def swap_inventory_rows(base_obs: th.Tensor, donor_obs: th.Tensor, inventory_row
     return hybrid
 
 
+def swap_world_rows(base_obs: th.Tensor, donor_obs: th.Tensor, inventory_rows: int) -> th.Tensor:
+    if inventory_rows <= 0:
+        raise ValueError("--inventory_rows must be positive.")
+    if base_obs.shape != donor_obs.shape:
+        raise ValueError(f"Observation shape mismatch: {tuple(base_obs.shape)} vs {tuple(donor_obs.shape)}")
+    if inventory_rows > base_obs.shape[1]:
+        raise ValueError(
+            f"inventory_rows={inventory_rows} exceeds observation height {base_obs.shape[1]}"
+        )
+
+    hybrid = base_obs.clone()
+    hybrid[:, :-inventory_rows, :] = donor_obs[:, :-inventory_rows, :]
+    return hybrid
+
+
 def observation_to_hwc(obs: th.Tensor) -> np.ndarray:
     return obs.detach().cpu().permute(1, 2, 0).numpy()
 
@@ -174,6 +189,43 @@ def save_fixed_base_figure(
     plt.close(fig)
 
 
+def save_dual_fixed_base_figure(
+    base_obs: th.Tensor,
+    donor_observations: List[th.Tensor],
+    inv_hybrid_observations: List[th.Tensor],
+    world_hybrid_observations: List[th.Tensor],
+    donor_steps: List[int],
+    base_step: int,
+    base_value: float,
+    donor_values: List[float],
+    inv_hybrid_values: List[float],
+    world_hybrid_values: List[float],
+    output_path: str,
+):
+    plt = __import__("matplotlib.pyplot", fromlist=["plt"])
+
+    n = len(donor_steps)
+    fig, axes = plt.subplots(n, 4, figsize=(12.8, max(3.0 * n, 4.0)))
+    axes = np.atleast_2d(axes)
+
+    for row_idx in range(n):
+        panels = [
+            (base_obs, f"Base {base_step}\nvalue={base_value:.3f}"),
+            (donor_observations[row_idx], f"Donor {donor_steps[row_idx]}\nvalue={donor_values[row_idx]:.3f}"),
+            (inv_hybrid_observations[row_idx], f"World {base_step} + inv donor\nvalue={inv_hybrid_values[row_idx]:.3f}"),
+            (world_hybrid_observations[row_idx], f"Inv {base_step} + world donor\nvalue={world_hybrid_values[row_idx]:.3f}"),
+        ]
+        for col_idx, (obs, title) in enumerate(panels):
+            axes[row_idx, col_idx].imshow(observation_to_hwc(obs))
+            axes[row_idx, col_idx].set_title(title, fontsize=9)
+            axes[row_idx, col_idx].axis("off")
+
+    fig.suptitle("Fixed-step counterfactual analysis")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 def save_variance_figure(
     row_vars: np.ndarray,
     col_vars: np.ndarray,
@@ -214,6 +266,31 @@ def save_fixed_base_value_plot(
     ax.set_xlabel("Donor step")
     ax.set_ylabel("Predicted value")
     ax.set_title("Fixed-base counterfactual inventory values")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_fixed_base_dual_value_plot(
+    donor_steps: List[int],
+    donor_values: List[float],
+    inventory_swap_values: List[float],
+    world_swap_values: List[float],
+    base_value: float,
+    output_path: str,
+):
+    plt = __import__("matplotlib.pyplot", fromlist=["plt"])
+
+    fig, ax = plt.subplots(figsize=(8.6, 4.8))
+    ax.plot(donor_steps, donor_values, marker="o", label="Original donor value")
+    ax.plot(donor_steps, inventory_swap_values, marker="o", label="Fixed world, swap inventory")
+    ax.plot(donor_steps, world_swap_values, marker="o", label="Fixed inventory, swap world")
+    ax.axhline(base_value, color="tab:red", linestyle="--", label=f"Base value ({base_value:.3f})")
+    ax.set_xlabel("Donor step")
+    ax.set_ylabel("Predicted value")
+    ax.set_title("Fixed-step counterfactual values")
     ax.legend()
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -284,26 +361,36 @@ def main():
         base_obs = observations[base_idx]
         base_value = evaluate_value(model, base_obs, device)
         donor_values = []
-        hybrid_values = []
+        inventory_swap_values = []
+        world_swap_values = []
         donor_observations = []
-        hybrid_observations = []
+        inventory_swap_observations = []
+        world_swap_observations = []
 
         print(f"Base step: {args.base_step}")
         print(f"Selected donor steps: {donor_steps}")
         print("")
-        print("donor_step\t donor_value\t hybrid_value\t delta")
+        print("donor_step\t donor_value\t inv_swap\t delta_inv\t world_swap\t delta_world")
         for donor_step, donor_idx in zip(donor_steps, donor_indices.tolist()):
             donor_obs = observations[donor_idx]
             donor_value = evaluate_value(model, donor_obs, device)
-            hybrid_obs = swap_inventory_rows(base_obs, donor_obs, args.inventory_rows)
-            hybrid_value = evaluate_value(model, hybrid_obs, device)
-            delta = hybrid_value - base_value
+            inventory_swap_obs = swap_inventory_rows(base_obs, donor_obs, args.inventory_rows)
+            inventory_swap_value = evaluate_value(model, inventory_swap_obs, device)
+            world_swap_obs = swap_world_rows(base_obs, donor_obs, args.inventory_rows)
+            world_swap_value = evaluate_value(model, world_swap_obs, device)
+            delta_inventory = inventory_swap_value - base_value
+            delta_world = world_swap_value - base_value
 
             donor_values.append(donor_value)
-            hybrid_values.append(hybrid_value)
+            inventory_swap_values.append(inventory_swap_value)
+            world_swap_values.append(world_swap_value)
             donor_observations.append(donor_obs)
-            hybrid_observations.append(hybrid_obs)
-            print(f"{donor_step:9d}\t {donor_value:11.4f}\t {hybrid_value:11.4f}\t {delta:+.4f}")
+            inventory_swap_observations.append(inventory_swap_obs)
+            world_swap_observations.append(world_swap_obs)
+            print(
+                f"{donor_step:9d}\t {donor_value:11.4f}\t {inventory_swap_value:8.4f}\t "
+                f"{delta_inventory:+9.4f}\t {world_swap_value:10.4f}\t {delta_world:+10.4f}"
+            )
 
         summary = {
             "mode": "fixed_base_step",
@@ -311,28 +398,34 @@ def main():
             "base_value": float(base_value),
             "donor_steps": donor_steps,
             "donor_values": donor_values,
-            "hybrid_values": hybrid_values,
-            "deltas": [hybrid - base_value for hybrid in hybrid_values],
-            "variance_hybrid_values": float(np.var(hybrid_values)),
+            "inventory_swap_values": inventory_swap_values,
+            "world_swap_values": world_swap_values,
+            "inventory_swap_deltas": [hybrid - base_value for hybrid in inventory_swap_values],
+            "world_swap_deltas": [hybrid - base_value for hybrid in world_swap_values],
+            "variance_inventory_swap_values": float(np.var(inventory_swap_values)),
+            "variance_world_swap_values": float(np.var(world_swap_values)),
             "variance_donor_values": float(np.var(donor_values)),
             "inventory_rows": int(args.inventory_rows),
         }
 
-        save_fixed_base_figure(
+        save_dual_fixed_base_figure(
             base_obs=base_obs,
             donor_observations=donor_observations,
-            hybrid_observations=hybrid_observations,
+            inv_hybrid_observations=inventory_swap_observations,
+            world_hybrid_observations=world_swap_observations,
             donor_steps=donor_steps,
             base_step=args.base_step,
             base_value=base_value,
             donor_values=donor_values,
-            hybrid_values=hybrid_values,
+            inv_hybrid_values=inventory_swap_values,
+            world_hybrid_values=world_swap_values,
             output_path=os.path.join(args.output_dir, "fixed_base_swaps.png"),
         )
-        save_fixed_base_value_plot(
+        save_fixed_base_dual_value_plot(
             donor_steps=donor_steps,
             donor_values=donor_values,
-            hybrid_values=hybrid_values,
+            inventory_swap_values=inventory_swap_values,
+            world_swap_values=world_swap_values,
             base_value=base_value,
             output_path=os.path.join(args.output_dir, "fixed_base_values.png"),
         )
@@ -341,7 +434,8 @@ def main():
 
         print("")
         print(f"Variance of donor values: {np.var(donor_values):.6f}")
-        print(f"Variance of hybrid values: {np.var(hybrid_values):.6f}")
+        print(f"Variance of fixed-world inventory swaps: {np.var(inventory_swap_values):.6f}")
+        print(f"Variance of fixed-inventory world swaps: {np.var(world_swap_values):.6f}")
         print(f"Saved outputs to {args.output_dir}")
         return
 
