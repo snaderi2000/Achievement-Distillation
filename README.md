@@ -93,6 +93,25 @@ python probe_counterfactual_inventory.py \
 
 This is an image-space intervention on the observation, not a full simulator-state edit, so it is best interpreted as “what does the critic do when the visible inventory panel changes?” rather than a perfect environment-level counterfactual.
 
+For a crude variance comparison over evenly spaced points in one episode, you can also build a square counterfactual matrix where rows fix the base/world state and columns vary the swapped inventory:
+
+```bash
+python analyze_counterfactual_inventory_variance.py \
+  --dataset_path value_dataset.pt \
+  --exp_name ppo \
+  --timestamp <timestamp> \
+  --train_seed 0 \
+  --episode_id 0 \
+  --num_steps 10 \
+  --output_dir counterfactual_inventory_analysis
+```
+
+This saves:
+- `selected_states.png`: the sampled states from the episode
+- `value_matrix_heatmap.png`: the hybrid value matrix
+- `variance_comparison.png`: fixed-state vs fixed-inventory variance bars
+- `summary.json`: numeric summary including the full matrix and average variances
+
 ## Citation
 
 If you find this code useful, please cite this work.
