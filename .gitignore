@@ -134,3 +134,5 @@ slurm/
 wandb/
 
 *.html
+
+*.pt
