@@ -146,6 +146,23 @@ Each `.pt` shard contains:
 
 If you still want inspectable image files for debugging, pass `--save_format png` and the script will save one PNG per frame instead.
 
+To domain-adapt pretrained DINOv3 on those Crafter shards, you can then run a lightweight VICReg fine-tuning pass that keeps most of the backbone frozen and only unfreezes the top transformer block:
+
+```bash
+python finetune_dino_crafter.py \
+  --dataset_dir dino_rollout_frames \
+  --output_dir dino_crafter_vicreg \
+  --model_name_or_path facebook/dinov3-vits16-pretrain-lvd1689m \
+  --batch_size 64 \
+  --epochs 10 \
+  --num_workers 4 \
+  --unfreeze_last_n_blocks 1 \
+  --lr_backbone 1e-5 \
+  --lr_head 1e-4
+```
+
+This saves Hugging Face-compatible backbone checkpoints under `dino_crafter_vicreg/final/backbone`, which can be plugged back into PPO by setting `dino_model_name` to that local path in the DINO PPO config.
+
 ## Citation
 
 If you find this code useful, please cite this work.
