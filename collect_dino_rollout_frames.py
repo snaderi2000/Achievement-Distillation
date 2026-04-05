@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 from functools import partial
+import time
 from typing import Dict, List
 
 import imageio.v3 as imageio
@@ -19,6 +20,7 @@ def collect_rollout_frames(
     eval_seed: int,
     frame_stride: int,
     max_frames: int | None,
+    log_every_frames: int,
 ) -> List[Dict]:
     from crafter.env import Env
     from stable_baselines3.common.vec_env.subproc_vec_env import SubprocVecEnv
@@ -38,11 +40,14 @@ def collect_rollout_frames(
     records: List[Dict] = []
     global_frame = 0
     obs = venv.reset()
+    start_time = time.time()
 
     next_episode_id = 0
     active_episode_ids = [-1 for _ in range(num_envs)]
     step_ids = [0 for _ in range(num_envs)]
     episode_counts = [0 for _ in range(num_envs)]
+    completed_episodes = 0
+    last_log_frame = 0
 
     for env_idx in range(num_envs):
         if next_episode_id < num_episodes:
@@ -82,12 +87,21 @@ def collect_rollout_frames(
                     }
                 )
                 global_frame += 1
+                if log_every_frames > 0 and global_frame - last_log_frame >= log_every_frames:
+                    elapsed = time.time() - start_time
+                    fps = global_frame / max(elapsed, 1e-6)
+                    print(
+                        f"[progress] saved_frames={global_frame} completed_episodes={completed_episodes}/{num_episodes} "
+                        f"elapsed={elapsed/60:.1f}m save_fps={fps:.1f}"
+                    )
+                    last_log_frame = global_frame
                 if max_frames is not None and global_frame >= max_frames:
                     venv.close()
                     return records
 
             step_ids[env_idx] += 1
             if bool(done_tensor[env_idx].item()):
+                completed_episodes += 1
                 episode_counts[env_idx] += 1
                 step_ids[env_idx] = 0
                 if next_episode_id < num_episodes:
@@ -102,7 +116,7 @@ def collect_rollout_frames(
     return records
 
 
-def save_records(records: List[Dict], output_dir: str, manifest_name: str, run_info: Dict):
+def save_records_png(records: List[Dict], output_dir: str, manifest_name: str, run_info: Dict):
     images_dir = os.path.join(output_dir, "images")
     os.makedirs(images_dir, exist_ok=True)
     manifest_path = os.path.join(output_dir, manifest_name)
@@ -130,6 +144,80 @@ def save_records(records: List[Dict], output_dir: str, manifest_name: str, run_i
             manifest.write(json.dumps(metadata) + "\n")
 
 
+def _stack_field(records: List[Dict], key: str, dtype=None):
+    values = [record[key] for record in records]
+    if dtype is None:
+        return np.array(values)
+    return np.array(values, dtype=dtype)
+
+
+def save_records_chunked(
+    records: List[Dict],
+    output_dir: str,
+    manifest_name: str,
+    run_info: Dict,
+    save_format: str,
+    shard_size: int,
+):
+    if shard_size <= 0:
+        raise ValueError("--shard_size must be positive.")
+
+    shards_dir = os.path.join(output_dir, "shards")
+    os.makedirs(shards_dir, exist_ok=True)
+    manifest_path = os.path.join(output_dir, manifest_name)
+
+    ext = "pt" if save_format == "pt" else "npz"
+    with open(manifest_path, "w", encoding="utf-8") as manifest:
+        manifest.write(json.dumps({"run_info": run_info}) + "\n")
+
+        for shard_idx, start in enumerate(range(0, len(records), shard_size)):
+            shard_records = records[start : start + shard_size]
+            shard_name = f"shard-{shard_idx:05d}.{ext}"
+            shard_path = os.path.join(shards_dir, shard_name)
+
+            shard_data = {
+                "observations": _stack_field(shard_records, "observation", np.uint8),
+                "episode_ids": _stack_field(shard_records, "episode_id", np.int64),
+                "step_ids": _stack_field(shard_records, "step_id", np.int64),
+                "env_indices": _stack_field(shard_records, "env_index", np.int64),
+                "env_episode_indices": _stack_field(shard_records, "env_episode_index", np.int64),
+                "eval_seeds": _stack_field(shard_records, "eval_seed", np.int64),
+                "actions": _stack_field(shard_records, "action", np.int64),
+                "rewards": _stack_field(shard_records, "reward", np.float32),
+                "dones": _stack_field(shard_records, "done", np.bool_),
+                "values": _stack_field(shard_records, "value", np.float32),
+                "achievements": _stack_field(shard_records, "achievements", np.int64),
+            }
+
+            if save_format == "pt":
+                th.save({k: th.from_numpy(v) for k, v in shard_data.items()}, shard_path)
+            else:
+                np.savez_compressed(shard_path, **shard_data)
+
+            metadata = {
+                "shard_path": os.path.join("shards", shard_name),
+                "num_frames": len(shard_records),
+                "start_index": start,
+                "end_index": start + len(shard_records) - 1,
+            }
+            manifest.write(json.dumps(metadata) + "\n")
+
+
+def save_records(
+    records: List[Dict],
+    output_dir: str,
+    manifest_name: str,
+    run_info: Dict,
+    save_format: str,
+    shard_size: int,
+):
+    os.makedirs(output_dir, exist_ok=True)
+    if save_format == "png":
+        save_records_png(records, output_dir, manifest_name, run_info)
+        return
+    save_records_chunked(records, output_dir, manifest_name, run_info, save_format, shard_size)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Roll out a trained Crafter agent and save visited frames as an image dataset for DINO fine-tuning."
@@ -145,6 +233,9 @@ def main():
     parser.add_argument("--max_frames", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default="dino_rollout_frames")
     parser.add_argument("--manifest_name", type=str, default="metadata.jsonl")
+    parser.add_argument("--save_format", type=str, choices=["png", "pt", "npz"], default="pt")
+    parser.add_argument("--shard_size", type=int, default=2048)
+    parser.add_argument("--log_every_frames", type=int, default=2000)
     args = parser.parse_args()
 
     device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
@@ -169,6 +260,7 @@ def main():
         eval_seed=args.eval_seed,
         frame_stride=args.frame_stride,
         max_frames=args.max_frames,
+        log_every_frames=args.log_every_frames,
     )
 
     run_info = {
@@ -181,9 +273,19 @@ def main():
         "num_envs": args.num_envs,
         "frame_stride": args.frame_stride,
         "max_frames": args.max_frames,
+        "save_format": args.save_format,
+        "shard_size": args.shard_size,
+        "log_every_frames": args.log_every_frames,
         "num_saved_frames": len(records),
     }
-    save_records(records, output_dir=args.output_dir, manifest_name=args.manifest_name, run_info=run_info)
+    save_records(
+        records,
+        output_dir=args.output_dir,
+        manifest_name=args.manifest_name,
+        run_info=run_info,
+        save_format=args.save_format,
+        shard_size=args.shard_size,
+    )
     print(f"Saved {len(records)} frames to {args.output_dir}")
     print(f"Manifest: {os.path.join(args.output_dir, args.manifest_name)}")
 

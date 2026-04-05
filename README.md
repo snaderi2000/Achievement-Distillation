@@ -117,7 +117,7 @@ This saves:
 - `variance_comparison.png`: fixed-state vs fixed-inventory variance bars
 - `summary.json`: numeric summary including the full matrix and average variances
 
-To build a frame dataset from a trained agent for DINO or other self-supervised adaptation, you can roll out a checkpoint and save the visited observations as PNGs plus a JSONL manifest:
+To build a frame dataset from a trained agent for DINO or other self-supervised adaptation, you can roll out a checkpoint and save the visited observations in chunked `.pt` shards plus a JSONL manifest:
 
 ```bash
 python collect_dino_rollout_frames.py \
@@ -127,17 +127,24 @@ python collect_dino_rollout_frames.py \
   --ckpt_epoch 1200 \
   --eval_seed 123 \
   --num_episodes 100 \
-  --num_envs 8 \
-  --frame_stride 8 \
+  --num_envs 16 \
+  --frame_stride 16 \
   --max_frames 100000 \
+  --save_format pt \
+  --shard_size 2048 \
   --output_dir dino_rollout_frames
 ```
 
 This writes:
-- `dino_rollout_frames/images/frame-*.png`: saved rollout frames
-- `dino_rollout_frames/metadata.jsonl`: one line per frame with episode id, step id, action, reward, done flag, predicted value, and achievement counts
+- `dino_rollout_frames/shards/shard-*.pt`: chunked tensors containing observations and rollout metadata
+- `dino_rollout_frames/metadata.jsonl`: one line per shard plus the run settings header
 
-The first line of the manifest stores the run settings so the dataset is easy to trace back to the checkpoint that generated it.
+Each `.pt` shard contains:
+- `observations`: `uint8` tensor of shape `[N, 64, 64, 3]`
+- `episode_ids`, `step_ids`, `env_indices`, `env_episode_indices`, `eval_seeds`
+- `actions`, `rewards`, `dones`, `values`, `achievements`
+
+If you still want inspectable image files for debugging, pass `--save_format png` and the script will save one PNG per frame instead.
 
 ## Citation
 
