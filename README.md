@@ -117,6 +117,27 @@ This saves:
 - `variance_comparison.png`: fixed-state vs fixed-inventory variance bars
 - `summary.json`: numeric summary including the full matrix and average variances
 
+To build a frame dataset from a trained agent for DINO or other self-supervised adaptation, you can roll out a checkpoint and save the visited observations as PNGs plus a JSONL manifest:
+
+```bash
+python collect_dino_rollout_frames.py \
+  --exp_name ppo_5m \
+  --timestamp debug \
+  --train_seed 0 \
+  --ckpt_epoch 1200 \
+  --eval_seed 123 \
+  --num_episodes 100 \
+  --frame_stride 4 \
+  --max_frames 100000 \
+  --output_dir dino_rollout_frames
+```
+
+This writes:
+- `dino_rollout_frames/images/frame-*.png`: saved rollout frames
+- `dino_rollout_frames/metadata.jsonl`: one line per frame with episode id, step id, action, reward, done flag, predicted value, and achievement counts
+
+The first line of the manifest stores the run settings so the dataset is easy to trace back to the checkpoint that generated it.
+
 ## Citation
 
 If you find this code useful, please cite this work.
