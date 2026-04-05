@@ -191,10 +191,30 @@ def vicreg_loss(
 
 
 def get_backbone_blocks(model: nn.Module):
-    if hasattr(model, "encoder") and hasattr(model.encoder, "layer"):
-        return model.encoder.layer
-    if hasattr(model, "vision_model") and hasattr(model.vision_model, "encoder") and hasattr(model.vision_model.encoder, "layer"):
-        return model.vision_model.encoder.layer
+    candidates = [
+        model,
+        getattr(model, "encoder", None),
+        getattr(model, "vision_model", None),
+        getattr(getattr(model, "vision_model", None), "encoder", None),
+    ]
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        for attr_name in ["layer", "layers", "block", "blocks"]:
+            if hasattr(candidate, attr_name):
+                blocks = getattr(candidate, attr_name)
+                if isinstance(blocks, (nn.ModuleList, list, tuple)) and len(blocks) > 0:
+                    return blocks
+
+    for module_name, module in model.named_modules():
+        for attr_name in ["layer", "layers", "block", "blocks"]:
+            if hasattr(module, attr_name):
+                blocks = getattr(module, attr_name)
+                if isinstance(blocks, (nn.ModuleList, list, tuple)) and len(blocks) > 0:
+                    print(f"Using backbone blocks from module '{module_name}.{attr_name}'")
+                    return blocks
+
     raise AttributeError("Could not find transformer blocks on this DINO model.")
 
 
@@ -210,12 +230,10 @@ def configure_trainable_backbone(model: nn.Module, unfreeze_last_n_blocks: int):
         for param in block.parameters():
             param.requires_grad = True
 
-    if hasattr(model, "layernorm") and isinstance(model.layernorm, nn.Module):
-        for param in model.layernorm.parameters():
-            param.requires_grad = True
-    if hasattr(model, "post_layernorm") and isinstance(model.post_layernorm, nn.Module):
-        for param in model.post_layernorm.parameters():
-            param.requires_grad = True
+    for norm_attr in ["layernorm", "post_layernorm", "norm"]:
+        if hasattr(model, norm_attr) and isinstance(getattr(model, norm_attr), nn.Module):
+            for param in getattr(model, norm_attr).parameters():
+                param.requires_grad = True
 
 
 @dataclass
