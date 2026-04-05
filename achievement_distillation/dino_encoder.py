@@ -13,16 +13,20 @@ class DinoV3Encoder(nn.Module):
         model_name: str,
         image_size: int = 224,
         freeze_backbone: bool = True,
+        unfreeze_last_n_blocks: int = 0,
     ):
         super().__init__()
         self.model = AutoModel.from_pretrained(model_name)
         self.image_size = image_size
         self.hidden_size = int(self.model.config.hidden_size)
         self.freeze_backbone = freeze_backbone
+        self.unfreeze_last_n_blocks = unfreeze_last_n_blocks
 
         if freeze_backbone:
             for param in self.model.parameters():
                 param.requires_grad = False
+        elif unfreeze_last_n_blocks > 0:
+            self._freeze_all_then_unfreeze_top_blocks(unfreeze_last_n_blocks)
 
         mean = th.tensor([0.485, 0.456, 0.406], dtype=th.float32).view(1, 3, 1, 1)
         std = th.tensor([0.229, 0.224, 0.225], dtype=th.float32).view(1, 3, 1, 1)
@@ -51,3 +55,49 @@ class DinoV3Encoder(nn.Module):
 
     def output_shape(self) -> Tuple[int]:
         return (self.hidden_size,)
+
+    def backbone_parameters(self):
+        return self.model.parameters()
+
+    def trainable_backbone_parameters(self):
+        return [param for param in self.model.parameters() if param.requires_grad]
+
+    def _get_backbone_blocks(self):
+        candidates = [
+            self.model,
+            getattr(self.model, "encoder", None),
+            getattr(self.model, "vision_model", None),
+            getattr(getattr(self.model, "vision_model", None), "encoder", None),
+        ]
+
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            for attr_name in ["layer", "layers", "block", "blocks"]:
+                if hasattr(candidate, attr_name):
+                    blocks = getattr(candidate, attr_name)
+                    if isinstance(blocks, (nn.ModuleList, list, tuple)) and len(blocks) > 0:
+                        return blocks
+
+        for _, module in self.model.named_modules():
+            for attr_name in ["layer", "layers", "block", "blocks"]:
+                if hasattr(module, attr_name):
+                    blocks = getattr(module, attr_name)
+                    if isinstance(blocks, (nn.ModuleList, list, tuple)) and len(blocks) > 0:
+                        return blocks
+
+        raise AttributeError("Could not find transformer blocks on this DINO model.")
+
+    def _freeze_all_then_unfreeze_top_blocks(self, unfreeze_last_n_blocks: int):
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        blocks = self._get_backbone_blocks()
+        for block in blocks[-unfreeze_last_n_blocks:]:
+            for param in block.parameters():
+                param.requires_grad = True
+
+        for norm_attr in ["layernorm", "post_layernorm", "norm"]:
+            if hasattr(self.model, norm_attr) and isinstance(getattr(self.model, norm_attr), nn.Module):
+                for param in getattr(self.model, norm_attr).parameters():
+                    param.requires_grad = True

@@ -20,6 +20,7 @@ class PPODinoModel(BaseModel):
         dino_model_name: str,
         dino_image_size: int = 224,
         freeze_backbone: bool = True,
+        unfreeze_last_n_blocks: int = 0,
         dense_init_norm_kwargs: Dict = {},
         action_head_kwargs: Dict = {},
         mse_head_kwargs: Dict = {},
@@ -30,6 +31,7 @@ class PPODinoModel(BaseModel):
             model_name=dino_model_name,
             image_size=dino_image_size,
             freeze_backbone=freeze_backbone,
+            unfreeze_last_n_blocks=unfreeze_last_n_blocks,
         )
         self.linear = FanInInitReLULayer(
             self.enc.hidden_size,
@@ -100,3 +102,15 @@ class PPODinoModel(BaseModel):
         vpreds = outputs["vpreds"]
         vf_loss = self.vf_head.mse_loss(vpreds, vtargs).mean()
         return {"pi_loss": pi_loss, "vf_loss": vf_loss, "entropy": entropy}
+
+    def get_param_groups(self):
+        backbone_params = list(self.enc.trainable_backbone_parameters())
+        backbone_ids = {id(param) for param in backbone_params}
+        head_params = [param for param in self.parameters() if param.requires_grad and id(param) not in backbone_ids]
+
+        groups = []
+        if backbone_params:
+            groups.append({"name": "backbone", "params": backbone_params})
+        if head_params:
+            groups.append({"name": "heads", "params": head_params})
+        return groups

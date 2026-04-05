@@ -17,6 +17,7 @@ class PPOAlgorithm(BaseAlgorithm):
         ent_coef: float,
         lr: float,
         max_grad_norm: float,
+        backbone_lr: float | None = None,
     ):
         super().__init__(model)
         self.model: PPOModel
@@ -30,7 +31,20 @@ class PPOAlgorithm(BaseAlgorithm):
         self.max_grad_norm = max_grad_norm
 
         # Optimizer
-        self.optimizer = optim.Adam(model.parameters(), lr=lr)
+        if hasattr(model, "get_param_groups"):
+            param_groups = model.get_param_groups()
+            if param_groups:
+                optimizer_groups = []
+                for group in param_groups:
+                    group_lr = lr
+                    if group.get("name") == "backbone" and backbone_lr is not None:
+                        group_lr = backbone_lr
+                    optimizer_groups.append({"params": group["params"], "lr": group_lr})
+                self.optimizer = optim.Adam(optimizer_groups, lr=lr)
+            else:
+                self.optimizer = optim.Adam(model.parameters(), lr=lr)
+        else:
+            self.optimizer = optim.Adam(model.parameters(), lr=lr)
 
     def update(self, storage: RolloutStorage):
         # Set model to training mode
