@@ -127,7 +127,8 @@ python collect_dino_rollout_frames.py \
   --ckpt_epoch 1200 \
   --eval_seed 123 \
   --num_episodes 100 \
-  --frame_stride 4 \
+  --num_envs 8 \
+  --frame_stride 8 \
   --max_frames 100000 \
   --output_dir dino_rollout_frames
 ```
