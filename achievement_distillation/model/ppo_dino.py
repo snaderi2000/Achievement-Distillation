@@ -21,6 +21,8 @@ class PPODinoModel(BaseModel):
         dino_image_size: int = 224,
         freeze_backbone: bool = True,
         unfreeze_last_n_blocks: int = 0,
+        dino_readout_type: str = "cls",
+        dino_attention_hidden_size: int | None = None,
         dense_init_norm_kwargs: Dict = {},
         action_head_kwargs: Dict = {},
         mse_head_kwargs: Dict = {},
@@ -32,9 +34,11 @@ class PPODinoModel(BaseModel):
             image_size=dino_image_size,
             freeze_backbone=freeze_backbone,
             unfreeze_last_n_blocks=unfreeze_last_n_blocks,
+            readout_type=dino_readout_type,
+            attention_hidden_size=dino_attention_hidden_size,
         )
         self.linear = FanInInitReLULayer(
-            self.enc.hidden_size,
+            self.enc.output_dim,
             hidsize,
             layer_type="linear",
             **dense_init_norm_kwargs,

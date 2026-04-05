@@ -14,6 +14,8 @@ class DinoV3Encoder(nn.Module):
         image_size: int = 224,
         freeze_backbone: bool = True,
         unfreeze_last_n_blocks: int = 0,
+        readout_type: str = "cls",
+        attention_hidden_size: int | None = None,
     ):
         super().__init__()
         self.model = AutoModel.from_pretrained(model_name)
@@ -21,12 +23,28 @@ class DinoV3Encoder(nn.Module):
         self.hidden_size = int(self.model.config.hidden_size)
         self.freeze_backbone = freeze_backbone
         self.unfreeze_last_n_blocks = unfreeze_last_n_blocks
+        self.readout_type = readout_type
+        self.attention_hidden_size = attention_hidden_size or self.hidden_size
+
+        if self.readout_type not in {"cls", "cls_mean", "cls_attn"}:
+            raise ValueError(f"Unsupported readout_type: {self.readout_type}")
 
         if freeze_backbone:
             for param in self.model.parameters():
                 param.requires_grad = False
         elif unfreeze_last_n_blocks > 0:
             self._freeze_all_then_unfreeze_top_blocks(unfreeze_last_n_blocks)
+
+        if self.readout_type == "cls_attn":
+            self.patch_attention = nn.Sequential(
+                nn.Linear(self.hidden_size, self.attention_hidden_size),
+                nn.GELU(),
+                nn.Linear(self.attention_hidden_size, 1),
+            )
+            self.output_dim = 2 * self.hidden_size
+        else:
+            self.patch_attention = None
+            self.output_dim = self.hidden_size
 
         mean = th.tensor([0.485, 0.456, 0.406], dtype=th.float32).view(1, 3, 1, 1)
         std = th.tensor([0.229, 0.224, 0.225], dtype=th.float32).view(1, 3, 1, 1)
@@ -50,11 +68,21 @@ class DinoV3Encoder(nn.Module):
                 outputs = self.model(pixel_values=pixel_values)
         else:
             outputs = self.model(pixel_values=pixel_values)
-        cls_token = outputs.last_hidden_state[:, 0]
-        return cls_token
+        tokens = outputs.last_hidden_state
+        cls_token = tokens[:, 0]
+        if self.readout_type == "cls":
+            return cls_token
+        patch_tokens = tokens[:, 1:]
+        patch_mean = patch_tokens.mean(dim=1)
+        if self.readout_type == "cls_mean":
+            return 0.5 * (cls_token + patch_mean)
+        attention_scores = self.patch_attention(patch_tokens)
+        attention_weights = th.softmax(attention_scores, dim=1)
+        attention_pool = (attention_weights * patch_tokens).sum(dim=1)
+        return th.cat([cls_token, attention_pool], dim=-1)
 
     def output_shape(self) -> Tuple[int]:
-        return (self.hidden_size,)
+        return (self.output_dim,)
 
     def backbone_parameters(self):
         return self.model.parameters()
