@@ -95,6 +95,23 @@ def main(args):
         **config["algorithm_kwargs"],
     )
 
+    if hasattr(model, "get_param_groups"):
+        param_groups = model.get_param_groups()
+        if param_groups:
+            print("\nparameter groups:")
+            for group in param_groups:
+                nparams = sum(param.numel() for param in group["params"])
+                print(f"  - {group['name']}: {nparams:,} params")
+    if hasattr(model, "enc") and hasattr(model.enc, "trainable_backbone_parameters"):
+        trainable_backbone = list(model.enc.trainable_backbone_parameters())
+        n_backbone = sum(param.numel() for param in trainable_backbone)
+        print(f"trainable backbone params: {n_backbone:,}")
+    if hasattr(algorithm, "optimizer"):
+        print("optimizer groups:")
+        for idx, group in enumerate(algorithm.optimizer.param_groups):
+            nparams = sum(param.numel() for param in group["params"])
+            print(f"  - group {idx}: lr={group['lr']:.2e}, params={nparams:,}")
+
     # Run algorithm
     total_successes = np.zeros((0, len(TASKS)), dtype=np.int32)
 
