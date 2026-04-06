@@ -23,6 +23,10 @@ class PPODinoModel(BaseModel):
         unfreeze_last_n_blocks: int = 0,
         dino_readout_type: str = "cls",
         dino_attention_hidden_size: int | None = None,
+        dino_use_lora: bool = False,
+        dino_lora_rank: int = 8,
+        dino_lora_alpha: float = 16.0,
+        dino_lora_dropout: float = 0.0,
         dense_init_norm_kwargs: Dict = {},
         action_head_kwargs: Dict = {},
         mse_head_kwargs: Dict = {},
@@ -36,6 +40,10 @@ class PPODinoModel(BaseModel):
             unfreeze_last_n_blocks=unfreeze_last_n_blocks,
             readout_type=dino_readout_type,
             attention_hidden_size=dino_attention_hidden_size,
+            use_lora=dino_use_lora,
+            lora_rank=dino_lora_rank,
+            lora_alpha=dino_lora_alpha,
+            lora_dropout=dino_lora_dropout,
         )
         self.linear = FanInInitReLULayer(
             self.enc.output_dim,

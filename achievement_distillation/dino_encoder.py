@@ -4,6 +4,7 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
+from achievement_distillation.lora import apply_lora_to_model, lora_parameters
 from transformers import AutoModel
 
 
@@ -16,6 +17,11 @@ class DinoV3Encoder(nn.Module):
         unfreeze_last_n_blocks: int = 0,
         readout_type: str = "cls",
         attention_hidden_size: int | None = None,
+        use_lora: bool = False,
+        lora_rank: int = 8,
+        lora_alpha: float = 16.0,
+        lora_dropout: float = 0.0,
+        lora_target_modules: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj"),
     ):
         super().__init__()
         self.model = AutoModel.from_pretrained(model_name)
@@ -25,11 +31,27 @@ class DinoV3Encoder(nn.Module):
         self.unfreeze_last_n_blocks = unfreeze_last_n_blocks
         self.readout_type = readout_type
         self.attention_hidden_size = attention_hidden_size or self.hidden_size
+        self.use_lora = use_lora
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        self.lora_dropout = lora_dropout
+        self.lora_target_modules = tuple(lora_target_modules)
+        self.lora_module_paths: list[str] = []
 
         if self.readout_type not in {"cls", "cls_mean", "cls_attn"}:
             raise ValueError(f"Unsupported readout_type: {self.readout_type}")
 
-        if freeze_backbone:
+        if self.use_lora:
+            for param in self.model.parameters():
+                param.requires_grad = False
+            self.lora_module_paths = apply_lora_to_model(
+                self.model,
+                target_module_names=self.lora_target_modules,
+                rank=self.lora_rank,
+                alpha=self.lora_alpha,
+                dropout=self.lora_dropout,
+            )
+        elif freeze_backbone:
             for param in self.model.parameters():
                 param.requires_grad = False
         elif unfreeze_last_n_blocks > 0:
@@ -88,6 +110,8 @@ class DinoV3Encoder(nn.Module):
         return self.model.parameters()
 
     def trainable_backbone_parameters(self):
+        if self.use_lora:
+            return list(lora_parameters(self.model))
         return [param for param in self.model.parameters() if param.requires_grad]
 
     def _get_backbone_blocks(self):
