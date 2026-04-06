@@ -38,7 +38,7 @@ class DinoV3Encoder(nn.Module):
         self.lora_target_modules = tuple(lora_target_modules)
         self.lora_module_paths: list[str] = []
 
-        if self.readout_type not in {"cls", "cls_mean", "cls_attn"}:
+        if self.readout_type not in {"cls", "patch_mean", "cls_mean", "cls_attn"}:
             raise ValueError(f"Unsupported readout_type: {self.readout_type}")
 
         if self.use_lora:
@@ -92,10 +92,12 @@ class DinoV3Encoder(nn.Module):
             outputs = self.model(pixel_values=pixel_values)
         tokens = outputs.last_hidden_state
         cls_token = tokens[:, 0]
+        patch_tokens = tokens[:, 1:]
         if self.readout_type == "cls":
             return cls_token
-        patch_tokens = tokens[:, 1:]
         patch_mean = patch_tokens.mean(dim=1)
+        if self.readout_type == "patch_mean":
+            return patch_mean
         if self.readout_type == "cls_mean":
             return 0.5 * (cls_token + patch_mean)
         attention_scores = self.patch_attention(patch_tokens)
