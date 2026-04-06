@@ -15,16 +15,17 @@ model_kwargs:
   unfreeze_last_n_blocks: 0
   dino_readout_type: cls
   dino_use_lora: True
-  dino_lora_rank: 8
+  dino_lora_rank: 4
   dino_lora_alpha: 16.0
   dino_lora_dropout: 0.05
+  dino_lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
   dense_init_norm_kwargs:
     layer_norm: True
 
 algorithm_cls: PPOAlgorithm
 algorithm_kwargs:
   ppo_nepoch: 3
-  ppo_nbatch: 16
+  ppo_nbatch: 64
   clip_param: 0.2
   vf_loss_coef: 0.5
   ent_coef: 0.01

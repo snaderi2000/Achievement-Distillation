@@ -27,6 +27,7 @@ class PPODinoModel(BaseModel):
         dino_lora_rank: int = 8,
         dino_lora_alpha: float = 16.0,
         dino_lora_dropout: float = 0.0,
+        dino_lora_target_modules: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj"),
         dense_init_norm_kwargs: Dict = {},
         action_head_kwargs: Dict = {},
         mse_head_kwargs: Dict = {},
@@ -44,6 +45,7 @@ class PPODinoModel(BaseModel):
             lora_rank=dino_lora_rank,
             lora_alpha=dino_lora_alpha,
             lora_dropout=dino_lora_dropout,
+            lora_target_modules=dino_lora_target_modules,
         )
         self.linear = FanInInitReLULayer(
             self.enc.output_dim,
