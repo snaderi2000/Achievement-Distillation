@@ -144,10 +144,15 @@ class ImpalaCNN(nn.Module):
             init_scale=1.4,
             **dense_init_norm_kwargs,
         )
+        self.final_spatial_shape = tuple(curshape)
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
+    def forward_features(self, x: th.Tensor) -> th.Tensor:
         for stack in self.stacks:
             x = stack(x)
+        return x
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        x = self.forward_features(x)
         x = x.reshape(x.size(0), -1)
         x = self.dense(x)
         return x
