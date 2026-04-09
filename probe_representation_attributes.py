@@ -69,13 +69,15 @@ def infer_tree_ids(env: Env) -> set[int]:
     if not isinstance(mat_ids, dict):
         raise RuntimeError("Could not access Crafter material id mapping from env._world._mat_ids.")
 
-    exact = [name for name in mat_ids if name == "tree"]
-    partial = [name for name in mat_ids if "tree" in name]
-    fallback = [name for name in mat_ids if name == "wood"]
+    material_names = [name for name in mat_ids.keys() if isinstance(name, str)]
+    exact = [name for name in material_names if name == "tree"]
+    partial = [name for name in material_names if "tree" in name]
+    fallback = [name for name in material_names if name == "wood"]
     names = exact or partial or fallback
     if not names:
         raise RuntimeError(
-            f"Could not infer a tree material id from Crafter materials: {sorted(mat_ids.keys())}"
+            "Could not infer a tree material id from Crafter materials: "
+            f"{sorted(material_names)}"
         )
     return {int(mat_ids[name]) for name in names}
 
@@ -90,8 +92,24 @@ def current_health(env: Env) -> int:
 def current_tree_count(env: Env, tree_ids: set[int]) -> int:
     if not hasattr(env, "_sem_view"):
         raise RuntimeError("Could not access Crafter semantic view via env._sem_view.")
+    if not hasattr(env, "_local_view"):
+        raise RuntimeError("Could not access Crafter local view via env._local_view.")
+    if not hasattr(env, "_player"):
+        raise RuntimeError("Could not access Crafter player state via env._player.")
+
     semantic = np.asarray(env._sem_view(), dtype=np.int64)
-    return int(np.isin(semantic, list(tree_ids)).sum())
+    local_grid = np.asarray(env._local_view._grid, dtype=np.int64)
+    offset = local_grid // 2
+    center = np.asarray(env._player.pos, dtype=np.int64)
+
+    visible = np.zeros(tuple(local_grid), dtype=semantic.dtype)
+    for x in range(local_grid[0]):
+        for y in range(local_grid[1]):
+            pos = center + np.array([x, y], dtype=np.int64) - offset
+            if 0 <= pos[0] < semantic.shape[0] and 0 <= pos[1] < semantic.shape[1]:
+                visible[x, y] = semantic[pos[0], pos[1]]
+
+    return int(np.isin(visible, list(tree_ids)).sum())
 
 
 def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
