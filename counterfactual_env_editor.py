@@ -306,10 +306,14 @@ def save_side_by_side(base_obs: np.ndarray, edited_obs: np.ndarray, base_value: 
 
 def main():
     parser = argparse.ArgumentParser(description="Edit live Crafter env state at a chosen replay step and re-score the value.")
-    parser.add_argument("--exp_name", type=str, required=True)
+    parser.add_argument("--exp_name", type=str, required=True, help="Checkpoint used for scoring unless replay_* overrides are provided.")
     parser.add_argument("--timestamp", type=str, required=True)
     parser.add_argument("--train_seed", type=int, required=True)
     parser.add_argument("--ckpt_epoch", type=int, required=True)
+    parser.add_argument("--replay_exp_name", type=str, default=None, help="Optional checkpoint used only to replay and recover the base scene.")
+    parser.add_argument("--replay_timestamp", type=str, default=None)
+    parser.add_argument("--replay_train_seed", type=int, default=None)
+    parser.add_argument("--replay_ckpt_epoch", type=int, default=None)
     parser.add_argument("--eval_seed", type=int, default=123)
     parser.add_argument("--episode_id", type=int, required=True)
     parser.add_argument("--step_id", type=int, required=True)
@@ -357,19 +361,45 @@ def main():
 
     set_seed(args.eval_seed)
     device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
-    model, config, ckpt_path = load_model(args.exp_name, args.timestamp, args.train_seed, args.ckpt_epoch, device)
-    print(f"Loaded checkpoint: {ckpt_path}")
+    score_model, score_config, score_ckpt_path = load_model(
+        args.exp_name, args.timestamp, args.train_seed, args.ckpt_epoch, device
+    )
+    print(f"Loaded scoring checkpoint: {score_ckpt_path}")
+
+    replay_exp_name = args.replay_exp_name or args.exp_name
+    replay_timestamp = args.replay_timestamp or args.timestamp
+    replay_train_seed = args.replay_train_seed if args.replay_train_seed is not None else args.train_seed
+    replay_ckpt_epoch = args.replay_ckpt_epoch if args.replay_ckpt_epoch is not None else args.ckpt_epoch
+
+    if (
+        replay_exp_name == args.exp_name
+        and replay_timestamp == args.timestamp
+        and replay_train_seed == args.train_seed
+        and replay_ckpt_epoch == args.ckpt_epoch
+    ):
+        replay_model = score_model
+        replay_config = score_config
+        replay_ckpt_path = score_ckpt_path
+    else:
+        replay_model, replay_config, replay_ckpt_path = load_model(
+            replay_exp_name,
+            replay_timestamp,
+            replay_train_seed,
+            replay_ckpt_epoch,
+            device,
+        )
+    print(f"Loaded replay checkpoint: {replay_ckpt_path}")
 
     replay = replay_to_step(
-        model=model,
-        config=config,
+        model=replay_model,
+        config=replay_config,
         eval_seed=args.eval_seed,
         target_episode=args.episode_id,
         target_step=args.step_id,
         device=device,
     )
     base_obs = replay.obs.copy()
-    base_value = score_observation(model, base_obs, device, replay.states)
+    base_value = score_observation(score_model, base_obs, device, replay.states)
 
     edits_log: List[str] = []
     inventory_updates = parse_inventory_assignments(args.set_inventory)
@@ -394,7 +424,7 @@ def main():
     apply_spawn_object(replay.env, object_specs, edits_log)
 
     edited_obs = render_env(replay.env)
-    edited_value = score_observation(model, edited_obs, device, replay.states)
+    edited_value = score_observation(score_model, edited_obs, device, replay.states)
 
     os.makedirs(args.output_dir, exist_ok=True)
     stem = f"{args.exp_name}-e{args.episode_id:03d}-s{args.step_id:04d}"
@@ -405,7 +435,8 @@ def main():
     save_side_by_side(base_obs, edited_obs, base_value, edited_value, figure_path, title_suffix)
 
     summary = {
-        "checkpoint": ckpt_path,
+        "scoring_checkpoint": score_ckpt_path,
+        "replay_checkpoint": replay_ckpt_path,
         "eval_seed": args.eval_seed,
         "episode_id": args.episode_id,
         "step_id": args.step_id,
