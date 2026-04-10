@@ -131,6 +131,22 @@ def material_names(env) -> List[str]:
     return sorted(name for name in mat_ids.keys() if isinstance(name, str))
 
 
+def visible_world_positions(env) -> List[Tuple[Tuple[int, int], Tuple[int, int], str]]:
+    local_grid = np.asarray(env._local_view._grid, dtype=np.int64)
+    offset = local_grid // 2
+    center = np.asarray(env._player.pos, dtype=np.int64)
+    world_area = np.array(env._world.area, dtype=np.int64)
+
+    positions = []
+    for dx in range(-int(offset[0]), int(offset[0]) + 1):
+        for dy in range(-int(offset[1]), int(offset[1]) + 1):
+            pos = center + np.array([dx, dy], dtype=np.int64)
+            if 0 <= pos[0] < world_area[0] and 0 <= pos[1] < world_area[1]:
+                material, _ = env._world[tuple(pos)]
+                positions.append(((dx, dy), (int(pos[0]), int(pos[1])), material))
+    return positions
+
+
 def apply_inventory_edits(env, inventory_updates: Dict[str, int], edits_log: List[str]):
     if not inventory_updates:
         return
@@ -202,6 +218,32 @@ def apply_material_edits(env, material_specs: Sequence[Tuple[int, int, str]], ed
             raise ValueError(f"Cannot overwrite the player's current tile with material '{material}'.")
         env._world[tuple(pos)] = material
         edits_log.append(f"material@({dx},{dy})={material}")
+
+
+def apply_replace_visible_material(env, source_material: Optional[str], target_material: Optional[str], edits_log: List[str]):
+    if not source_material:
+        return
+    if not target_material:
+        raise ValueError("--replace_visible_material_with is required when using --replace_visible_material.")
+
+    valid_materials = set(material_names(env))
+    if source_material not in valid_materials:
+        raise ValueError(f"Unknown source material '{source_material}'. Valid materials: {sorted(valid_materials)}")
+    if target_material not in valid_materials:
+        raise ValueError(f"Unknown target material '{target_material}'. Valid materials: {sorted(valid_materials)}")
+
+    replaced = 0
+    for (dx, dy), world_pos, material in visible_world_positions(env):
+        if material != source_material:
+            continue
+        _, obj = env._world[world_pos]
+        if obj is env._player:
+            continue
+        env._world[world_pos] = target_material
+        replaced += 1
+        edits_log.append(f"material@({dx},{dy})={target_material}")
+
+    edits_log.append(f"replace_visible_material {source_material}->{target_material} count={replaced}")
 
 
 def valid_spawn_objects() -> List[str]:
@@ -290,6 +332,18 @@ def main():
         help="Set material at relative visible coordinate dx,dy,material. Can be repeated.",
     )
     parser.add_argument(
+        "--replace_visible_material",
+        type=str,
+        default=None,
+        help="Replace every visible tile of this material with --replace_visible_material_with.",
+    )
+    parser.add_argument(
+        "--replace_visible_material_with",
+        type=str,
+        default=None,
+        help="Target material used by --replace_visible_material.",
+    )
+    parser.add_argument(
         "--spawn_object",
         action="append",
         default=[],
@@ -331,6 +385,12 @@ def main():
     apply_move_player(replay.env, move_player, set_player_pos, edits_log)
     apply_clear_object(replay.env, clear_specs, edits_log)
     apply_material_edits(replay.env, material_specs, edits_log)
+    apply_replace_visible_material(
+        replay.env,
+        args.replace_visible_material,
+        args.replace_visible_material_with,
+        edits_log,
+    )
     apply_spawn_object(replay.env, object_specs, edits_log)
 
     edited_obs = render_env(replay.env)
