@@ -49,6 +49,13 @@ def parse_material_edit(text: str) -> Tuple[int, int, str]:
     return int(parts[0]), int(parts[1]), parts[2]
 
 
+def parse_object_edit(text: str) -> Tuple[int, int, str]:
+    parts = [part.strip() for part in text.split(",")]
+    if len(parts) != 3:
+        raise ValueError(f"Invalid object edit '{text}'. Expected dx,dy,object.")
+    return int(parts[0]), int(parts[1]), parts[2]
+
+
 def obs_to_tensor(obs: np.ndarray, device: th.device) -> th.Tensor:
     obs = th.from_numpy(np.transpose(obs, (2, 0, 1))).unsqueeze(0).to(device)
     return obs.float() / 255.0
@@ -197,6 +204,48 @@ def apply_material_edits(env, material_specs: Sequence[Tuple[int, int, str]], ed
         edits_log.append(f"material@({dx},{dy})={material}")
 
 
+def valid_spawn_objects() -> List[str]:
+    return ["cow", "zombie", "skeleton", "plant", "fence", "arrow_left", "arrow_right", "arrow_up", "arrow_down"]
+
+
+def apply_spawn_object(env, object_specs: Sequence[Tuple[int, int, str]], edits_log: List[str]):
+    if not object_specs:
+        return
+
+    from crafter.objects import Arrow, Cow, Fence, Plant, Skeleton, Zombie
+
+    constructors = {
+        "cow": lambda world, pos: Cow(world, pos),
+        "zombie": lambda world, pos: Zombie(world, pos, env._player),
+        "skeleton": lambda world, pos: Skeleton(world, pos, env._player),
+        "plant": lambda world, pos: Plant(world, pos),
+        "fence": lambda world, pos: Fence(world, pos),
+        "arrow_left": lambda world, pos: Arrow(world, pos, np.array([-1, 0], dtype=np.int64)),
+        "arrow_right": lambda world, pos: Arrow(world, pos, np.array([1, 0], dtype=np.int64)),
+        "arrow_up": lambda world, pos: Arrow(world, pos, np.array([0, -1], dtype=np.int64)),
+        "arrow_down": lambda world, pos: Arrow(world, pos, np.array([0, 1], dtype=np.int64)),
+    }
+
+    for dx, dy, object_name in object_specs:
+        if object_name not in constructors:
+            raise ValueError(f"Unknown spawn object '{object_name}'. Valid objects: {valid_spawn_objects()}")
+        pos = world_pos_from_delta(env, dx, dy)
+        material, obj = env._world[tuple(pos)]
+        if obj is env._player:
+            raise ValueError(f"Cannot spawn '{object_name}' on the player's current tile.")
+        if obj is not None:
+            env._world.remove(obj)
+        spawned = constructors[object_name](env._world, pos)
+        if hasattr(spawned, "is_free") and not isinstance(spawned, Arrow):
+            # For static creatures/objects, respect walkability on the underlying material.
+            if material not in spawned.walkable:
+                raise ValueError(
+                    f"Cannot spawn '{object_name}' on non-walkable material '{material}' at {tuple(pos)}."
+                )
+        env._world.add(spawned)
+        edits_log.append(f"spawn@({dx},{dy})={object_name}")
+
+
 def save_side_by_side(base_obs: np.ndarray, edited_obs: np.ndarray, base_value: float, edited_value: float, output_path: str, title_suffix: str):
     fig, axes = plt.subplots(1, 2, figsize=(8.6, 4.2))
     axes[0].imshow(base_obs)
@@ -240,6 +289,15 @@ def main():
         default=[],
         help="Set material at relative visible coordinate dx,dy,material. Can be repeated.",
     )
+    parser.add_argument(
+        "--spawn_object",
+        action="append",
+        default=[],
+        help=(
+            "Spawn a real Crafter object at relative visible coordinate dx,dy,object. "
+            f"Valid objects: {', '.join(valid_spawn_objects())}. Can be repeated."
+        ),
+    )
     parser.add_argument("--output_dir", type=str, default="counterfactual_env_editor")
     args = parser.parse_args()
 
@@ -265,6 +323,7 @@ def main():
     set_player_pos = parse_vec2(args.set_player_pos) if args.set_player_pos else None
     clear_specs = [parse_vec2(text) for text in args.clear_object]
     material_specs = [parse_material_edit(text) for text in args.set_material]
+    object_specs = [parse_object_edit(text) for text in args.spawn_object]
 
     apply_health_edit(replay.env, args.set_health, edits_log)
     apply_inventory_edits(replay.env, inventory_updates, edits_log)
@@ -272,6 +331,7 @@ def main():
     apply_move_player(replay.env, move_player, set_player_pos, edits_log)
     apply_clear_object(replay.env, clear_specs, edits_log)
     apply_material_edits(replay.env, material_specs, edits_log)
+    apply_spawn_object(replay.env, object_specs, edits_log)
 
     edited_obs = render_env(replay.env)
     edited_value = score_observation(model, edited_obs, device, replay.states)
