@@ -4,7 +4,7 @@ import os
 import random
 import sys
 from collections import Counter
-from typing import Dict, Iterable
+from typing import Dict, Iterable, Tuple
 
 import numpy as np
 import torch as th
@@ -82,6 +82,16 @@ def infer_tree_ids(env: Env) -> set[int]:
     return {int(mat_ids[name]) for name in names}
 
 
+def infer_material_ids(env: Env, material_name: str) -> set[int]:
+    mat_ids = getattr(getattr(env, "_world", None), "_mat_ids", None)
+    if not isinstance(mat_ids, dict):
+        raise RuntimeError("Could not access Crafter material id mapping from env._world._mat_ids.")
+    if material_name not in mat_ids:
+        valid = sorted(name for name in mat_ids.keys() if isinstance(name, str))
+        raise RuntimeError(f"Could not find material '{material_name}'. Valid materials include: {valid}")
+    return {int(mat_ids[material_name])}
+
+
 def current_health(env: Env) -> int:
     inventory = getattr(getattr(env, "_player", None), "inventory", None)
     if inventory is None or "health" not in inventory:
@@ -89,7 +99,7 @@ def current_health(env: Env) -> int:
     return int(inventory["health"])
 
 
-def current_tree_count(env: Env, tree_ids: set[int]) -> int:
+def current_visible_semantic(env: Env) -> np.ndarray:
     if not hasattr(env, "_sem_view"):
         raise RuntimeError("Could not access Crafter semantic view via env._sem_view.")
     if not hasattr(env, "_local_view"):
@@ -109,7 +119,30 @@ def current_tree_count(env: Env, tree_ids: set[int]) -> int:
             if 0 <= pos[0] < semantic.shape[0] and 0 <= pos[1] < semantic.shape[1]:
                 visible[x, y] = semantic[pos[0], pos[1]]
 
+    return visible
+
+
+def current_tree_count(env: Env, tree_ids: set[int]) -> int:
+    visible = current_visible_semantic(env)
+
     return int(np.isin(visible, list(tree_ids)).sum())
+
+
+def current_water_labels(env: Env, water_ids: set[int]) -> Dict[str, int]:
+    visible = current_visible_semantic(env)
+    water_mask = np.isin(visible, list(water_ids))
+    h, w = water_mask.shape
+    cx, cy = h // 2, w // 2
+
+    quadrants = {
+        "water_nw": water_mask[:cx, :cy],
+        "water_ne": water_mask[:cx, cy + 1 :],
+        "water_sw": water_mask[cx + 1 :, :cy],
+        "water_se": water_mask[cx + 1 :, cy + 1 :],
+    }
+    labels = {name: int(region.any()) for name, region in quadrants.items()}
+    labels["water_visible"] = int(water_mask.any())
+    return labels
 
 
 def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
@@ -124,7 +157,9 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
 
     env = Env(seed=args.eval_seed)
     tree_ids = infer_tree_ids(env)
+    water_ids = infer_material_ids(env, "water")
     print(f"Tree semantic ids used for counting: {sorted(tree_ids)}")
+    print(f"Water semantic ids used for labeling: {sorted(water_ids)}")
 
     hidsize = config.get("model_kwargs", {}).get("hidsize", 512)
     obs = env.reset()
@@ -133,6 +168,11 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
     observations = []
     health_labels = []
     tree_labels = []
+    water_visible_labels = []
+    water_nw_labels = []
+    water_ne_labels = []
+    water_sw_labels = []
+    water_se_labels = []
     episode_ids = []
     step_ids = []
 
@@ -148,6 +188,12 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
             observations.append(th.from_numpy(np.transpose(obs, (2, 0, 1))).to(th.uint8))
             health_labels.append(current_health(env))
             tree_labels.append(current_tree_count(env, tree_ids))
+            water_labels = current_water_labels(env, water_ids)
+            water_visible_labels.append(water_labels["water_visible"])
+            water_nw_labels.append(water_labels["water_nw"])
+            water_ne_labels.append(water_labels["water_ne"])
+            water_sw_labels.append(water_labels["water_sw"])
+            water_se_labels.append(water_labels["water_se"])
             episode_ids.append(episode_idx)
             step_ids.append(step_idx)
 
@@ -182,6 +228,11 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
         "observations": th.stack(observations),
         "health": th.tensor(health_labels, dtype=th.long),
         "tree_count": th.tensor(tree_labels, dtype=th.long),
+        "water_visible": th.tensor(water_visible_labels, dtype=th.long),
+        "water_nw": th.tensor(water_nw_labels, dtype=th.long),
+        "water_ne": th.tensor(water_ne_labels, dtype=th.long),
+        "water_sw": th.tensor(water_sw_labels, dtype=th.long),
+        "water_se": th.tensor(water_se_labels, dtype=th.long),
         "episode_ids": th.tensor(episode_ids, dtype=th.long),
         "step_ids": th.tensor(step_ids, dtype=th.long),
         "metadata": {
@@ -192,12 +243,14 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
             "eval_seed": args.eval_seed,
             "num_episodes": args.num_episodes,
             "tree_ids": sorted(tree_ids),
+            "water_ids": sorted(water_ids),
         },
     }
     print(
         f"Collected {dataset['observations'].shape[0]} states. "
         f"Health range: {dataset['health'].min().item()}-{dataset['health'].max().item()}, "
-        f"tree_count range: {dataset['tree_count'].min().item()}-{dataset['tree_count'].max().item()}"
+        f"tree_count range: {dataset['tree_count'].min().item()}-{dataset['tree_count'].max().item()}, "
+        f"water_visible positives: {int(dataset['water_visible'].sum().item())}"
     )
     return dataset
 
@@ -325,7 +378,12 @@ def main():
     parser.add_argument("--analysis_timestamp", type=str, help="Timestamp of analysis checkpoint.")
     parser.add_argument("--analysis_train_seed", type=int, help="Train seed of analysis checkpoint.")
     parser.add_argument("--analysis_ckpt_epoch", type=int, default=250)
-    parser.add_argument("--target", type=str, choices=("health", "tree_count"), default="health")
+    parser.add_argument(
+        "--target",
+        type=str,
+        choices=("health", "tree_count", "water_visible", "water_nw", "water_ne", "water_sw", "water_se"),
+        default="health",
+    )
     parser.add_argument("--tree_count_cap", type=int, default=None, help="Optionally cap tree counts into a final bucket.")
     parser.add_argument("--train_size", type=int, default=50000)
     parser.add_argument("--test_size", type=int, default=10000)
