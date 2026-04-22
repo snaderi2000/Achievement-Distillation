@@ -50,6 +50,7 @@ def sample_rollouts(
         outputs["rewards"] = rewards
         outputs["masks"] = 1.0 - dones
         outputs["successes"] = infos["successes"]
+        outputs["episode_lengths"] = infos["episode_lengths"]
 
 
         # Update storage

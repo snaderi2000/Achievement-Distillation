@@ -18,6 +18,7 @@ class PPOAlgorithm(BaseAlgorithm):
         lr: float,
         max_grad_norm: float,
         backbone_lr: float | None = None,
+        phase_vf_loss_coef: float = 0.0,
     ):
         super().__init__(model)
         self.model: PPOModel
@@ -29,6 +30,7 @@ class PPOAlgorithm(BaseAlgorithm):
         self.vf_loss_coef = vf_loss_coef
         self.ent_coef = ent_coef
         self.max_grad_norm = max_grad_norm
+        self.phase_vf_loss_coef = phase_vf_loss_coef
 
         # Optimizer
         if hasattr(model, "get_param_groups"):
@@ -54,6 +56,7 @@ class PPOAlgorithm(BaseAlgorithm):
         pi_loss_epoch = 0
         vf_loss_epoch = 0
         entropy_epoch = 0
+        phase_vf_loss_epoch = 0
         nupdate = 0
 
         for _ in range(self.ppo_nepoch):
@@ -66,7 +69,15 @@ class PPOAlgorithm(BaseAlgorithm):
                 pi_loss = losses["pi_loss"]
                 vf_loss = losses["vf_loss"]
                 entropy = losses["entropy"]
-                loss = pi_loss + self.vf_loss_coef * vf_loss - self.ent_coef * entropy
+                phase_vf_loss = losses.get("phase_vf_loss")
+                if phase_vf_loss is None:
+                    phase_vf_loss = pi_loss.new_zeros(())
+                loss = (
+                    pi_loss
+                    + self.vf_loss_coef * vf_loss
+                    + self.phase_vf_loss_coef * phase_vf_loss
+                    - self.ent_coef * entropy
+                )
 
                 # Update parameter
                 self.optimizer.zero_grad()
@@ -78,12 +89,14 @@ class PPOAlgorithm(BaseAlgorithm):
                 pi_loss_epoch += pi_loss.item()
                 vf_loss_epoch += vf_loss.item()
                 entropy_epoch += entropy.item()
+                phase_vf_loss_epoch += phase_vf_loss.item()
                 nupdate += 1
 
         # Compute average stats
         pi_loss_epoch /= nupdate
         vf_loss_epoch /= nupdate
         entropy_epoch /= nupdate
+        phase_vf_loss_epoch /= nupdate
 
         # Define train stats
         train_stats = {
@@ -91,5 +104,7 @@ class PPOAlgorithm(BaseAlgorithm):
             "vf_loss": vf_loss_epoch,
             "entropy": entropy_epoch,
         }
+        if self.phase_vf_loss_coef > 0:
+            train_stats["phase_vf_loss"] = phase_vf_loss_epoch
 
         return train_stats

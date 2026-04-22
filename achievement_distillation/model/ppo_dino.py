@@ -7,7 +7,7 @@ from gym import spaces
 from achievement_distillation.action_head import CategoricalActionHead
 from achievement_distillation.dino_encoder import DinoV3Encoder
 from achievement_distillation.model.base import BaseModel
-from achievement_distillation.mse_head import ScaledMSEHead
+from achievement_distillation.mse_head import PlainMSEHead, ScaledMSEHead
 from achievement_distillation.torch_util import FanInInitReLULayer
 
 
@@ -31,6 +31,7 @@ class PPODinoModel(BaseModel):
         dense_init_norm_kwargs: Dict = {},
         action_head_kwargs: Dict = {},
         mse_head_kwargs: Dict = {},
+        use_phase_vf_head: bool = False,
     ):
         super().__init__(observation_space, action_space)
 
@@ -66,6 +67,12 @@ class PPODinoModel(BaseModel):
             outsize=1,
             **mse_head_kwargs,
         )
+        self.use_phase_vf_head = use_phase_vf_head
+        if use_phase_vf_head:
+            self.phase_vf_head = PlainMSEHead(
+                insize=hidsize,
+                outsize=1,
+            )
 
     @th.no_grad()
     def act(self, obs: th.Tensor, **kwargs) -> Dict[str, th.Tensor]:
@@ -83,13 +90,16 @@ class PPODinoModel(BaseModel):
         pi_latents = vf_latents = latents
         pi_logits = self.pi_head(pi_latents)
         vpreds = self.vf_head(vf_latents)
-        return {
+        outputs = {
             "latents": latents,
             "pi_latents": pi_latents,
             "vf_latents": vf_latents,
             "pi_logits": pi_logits,
             "vpreds": vpreds,
         }
+        if self.use_phase_vf_head:
+            outputs["phase_vpreds"] = self.phase_vf_head(vf_latents)
+        return outputs
 
     def encode(self, obs: th.Tensor) -> th.Tensor:
         x = self.enc(obs)
@@ -104,6 +114,8 @@ class PPODinoModel(BaseModel):
         vtargs: th.Tensor,
         advs: th.Tensor,
         clip_param: float = 0.2,
+        phase_ids: th.Tensor | None = None,
+        phase_mask: th.Tensor | None = None,
         **kwargs,
     ) -> Dict[str, th.Tensor]:
         outputs = self.forward(obs, **kwargs)
@@ -115,7 +127,43 @@ class PPODinoModel(BaseModel):
         entropy = self.pi_head.entropy(pi_logits).mean()
         vpreds = outputs["vpreds"]
         vf_loss = self.vf_head.mse_loss(vpreds, vtargs).mean()
-        return {"pi_loss": pi_loss, "vf_loss": vf_loss, "entropy": entropy}
+        losses = {"pi_loss": pi_loss, "vf_loss": vf_loss, "entropy": entropy}
+        if self.use_phase_vf_head:
+            phase_vf_loss = th.zeros((), device=vtargs.device)
+            if phase_ids is not None and phase_mask is not None:
+                phase_targets, valid_mask = self.compute_phase_normalized_targets(
+                    vtargs=vtargs,
+                    phase_ids=phase_ids,
+                    phase_mask=phase_mask,
+                )
+                if valid_mask.any():
+                    phase_vpreds = outputs["phase_vpreds"]
+                    phase_vf_loss = self.phase_vf_head.mse_loss(
+                        phase_vpreds[valid_mask],
+                        phase_targets[valid_mask],
+                    ).mean()
+            losses["phase_vf_loss"] = phase_vf_loss
+        return losses
+
+    def compute_phase_normalized_targets(
+        self,
+        vtargs: th.Tensor,
+        phase_ids: th.Tensor,
+        phase_mask: th.Tensor,
+        num_phases: int = 4,
+        eps: float = 1e-6,
+    ) -> tuple[th.Tensor, th.Tensor]:
+        phase_targets = th.zeros_like(vtargs)
+        valid_mask = phase_mask.bool()
+        for phase in range(num_phases):
+            phase_sel = valid_mask & (phase_ids == phase)
+            if not phase_sel.any():
+                continue
+            phase_values = vtargs[phase_sel]
+            mean = phase_values.mean()
+            std = phase_values.std(unbiased=False)
+            phase_targets[phase_sel] = (phase_values - mean) / (std + eps)
+        return phase_targets, valid_mask
 
     def get_param_groups(self):
         backbone_params = list(self.enc.trainable_backbone_parameters())

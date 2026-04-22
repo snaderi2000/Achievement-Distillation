@@ -46,6 +46,7 @@ class RolloutStorage:
         self.timesteps = th.zeros(nstep + 1, nproc, 1, device=device).long()
         self.states = th.zeros(nstep + 1, nproc, hidsize, device=device)
         self.vitals = th.zeros(nstep + 1, nproc, 4, device=device)
+        self.done_episode_lengths = th.zeros(nstep, nproc, 1, device=device).long()
 
         # Step
         self.step = 0
@@ -69,6 +70,7 @@ class RolloutStorage:
         successes: th.Tensor,
         model: BaseModel,
         vitals: Optional[th.Tensor] = None,
+        episode_lengths: Optional[th.Tensor] = None,
         **kwargs,
     ):
         # Get prev successes, timesteps, and states
@@ -108,6 +110,10 @@ class RolloutStorage:
         self.states[self.step + 1].copy_(states)
         if vitals is not None:
             self.vitals[self.step + 1].copy_(vitals)
+        if episode_lengths is not None:
+            self.done_episode_lengths[self.step].copy_(episode_lengths.view(-1, 1).long())
+        else:
+            self.done_episode_lengths[self.step].zero_()
         # Update step
         self.step = (self.step + 1) % self.nstep
 
@@ -119,8 +125,34 @@ class RolloutStorage:
         self.timesteps[0].copy_(self.timesteps[-1])
         self.states[0].copy_(self.states[-1])
         self.vitals[0].copy_(self.vitals[-1])
+        self.done_episode_lengths.zero_()
         # Reset step
         self.step = 0
+
+    def get_phase_labels(self, num_phases: int = 4):
+        phase_ids = th.full((self.nstep, self.nproc, 1), -1, device=self.device).long()
+        phase_mask = th.zeros((self.nstep, self.nproc, 1), device=self.device).bool()
+
+        for env_idx in range(self.nproc):
+            segment_start = 0
+            while segment_start < self.nstep:
+                done_indices = (self.done_episode_lengths[segment_start:, env_idx, 0] > 0).nonzero(as_tuple=False)
+                if len(done_indices) == 0:
+                    break
+                segment_end = segment_start + int(done_indices[0].item())
+                episode_length = int(self.done_episode_lengths[segment_end, env_idx, 0].item())
+                if episode_length <= 0:
+                    segment_start = segment_end + 1
+                    continue
+
+                episode_steps = self.timesteps[segment_start:segment_end + 1, env_idx, 0]
+                denom = max(episode_length, 1)
+                phase_values = th.clamp((episode_steps * num_phases) // denom, max=num_phases - 1)
+                phase_ids[segment_start:segment_end + 1, env_idx, 0] = phase_values
+                phase_mask[segment_start:segment_end + 1, env_idx, 0] = True
+                segment_start = segment_end + 1
+
+        return phase_ids, phase_mask
 
     def compute_returns(self, gamma: float, gae_lambda: float):
         # Compute returns
@@ -153,6 +185,9 @@ class RolloutStorage:
         vtargs = self.returns.view(-1, *self.returns.shape[2:])
         log_probs = self.log_probs.view(-1, *self.log_probs.shape[2:])
         advs = self.advs.view(-1, *self.advs.shape[2:])
+        phase_ids, phase_mask = self.get_phase_labels()
+        phase_ids = phase_ids.view(-1, 1)
+        phase_mask = phase_mask.view(-1, 1)
 
         for indices in sampler:
             batch = {
@@ -162,6 +197,8 @@ class RolloutStorage:
                 "vtargs": vtargs[indices],
                 "log_probs": log_probs[indices],
                 "advs": advs[indices],
+                "phase_ids": phase_ids[indices],
+                "phase_mask": phase_mask[indices],
             }
             yield batch
 

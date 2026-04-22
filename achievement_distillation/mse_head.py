@@ -39,3 +39,22 @@ class ScaledMSEHead(nn.Module):
 
     def mse_loss(self, pred: th.Tensor, targ: th.Tensor) -> th.Tensor:
         return F.mse_loss(pred, self.normalizer(targ), reduction="none")
+
+
+class PlainMSEHead(nn.Module):
+    def __init__(
+        self,
+        insize: int,
+        outsize: int,
+        init_scale: float = 0.1,
+    ):
+        super().__init__()
+        self.linear = nn.Linear(insize, outsize)
+        init.orthogonal_(self.linear.weight, gain=init_scale)
+        init.constant_(self.linear.bias, val=0.0)
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        return self.linear(x)
+
+    def mse_loss(self, pred: th.Tensor, targ: th.Tensor) -> th.Tensor:
+        return F.mse_loss(pred, targ, reduction="none")
