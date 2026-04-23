@@ -19,6 +19,8 @@ class PPOAlgorithm(BaseAlgorithm):
         max_grad_norm: float,
         backbone_lr: float | None = None,
         phase_vf_loss_coef: float = 0.0,
+        short_reward_loss_coef: float = 0.0,
+        short_reward_horizon: int = 0,
     ):
         super().__init__(model)
         self.model: PPOModel
@@ -31,6 +33,8 @@ class PPOAlgorithm(BaseAlgorithm):
         self.ent_coef = ent_coef
         self.max_grad_norm = max_grad_norm
         self.phase_vf_loss_coef = phase_vf_loss_coef
+        self.short_reward_loss_coef = short_reward_loss_coef
+        self.short_reward_horizon = short_reward_horizon
 
         # Optimizer
         if hasattr(model, "get_param_groups"):
@@ -57,11 +61,15 @@ class PPOAlgorithm(BaseAlgorithm):
         vf_loss_epoch = 0
         entropy_epoch = 0
         phase_vf_loss_epoch = 0
+        short_reward_loss_epoch = 0
         nupdate = 0
 
         for _ in range(self.ppo_nepoch):
             # Get data loader
-            data_loader = storage.get_data_loader(self.ppo_nbatch)
+            data_loader = storage.get_data_loader(
+                self.ppo_nbatch,
+                short_reward_horizon=self.short_reward_horizon,
+            )
 
             for batch in data_loader:
                 # Compute loss
@@ -72,10 +80,14 @@ class PPOAlgorithm(BaseAlgorithm):
                 phase_vf_loss = losses.get("phase_vf_loss")
                 if phase_vf_loss is None:
                     phase_vf_loss = pi_loss.new_zeros(())
+                short_reward_loss = losses.get("short_reward_loss")
+                if short_reward_loss is None:
+                    short_reward_loss = pi_loss.new_zeros(())
                 loss = (
                     pi_loss
                     + self.vf_loss_coef * vf_loss
                     + self.phase_vf_loss_coef * phase_vf_loss
+                    + self.short_reward_loss_coef * short_reward_loss
                     - self.ent_coef * entropy
                 )
 
@@ -90,6 +102,7 @@ class PPOAlgorithm(BaseAlgorithm):
                 vf_loss_epoch += vf_loss.item()
                 entropy_epoch += entropy.item()
                 phase_vf_loss_epoch += phase_vf_loss.item()
+                short_reward_loss_epoch += short_reward_loss.item()
                 nupdate += 1
 
         # Compute average stats
@@ -97,6 +110,7 @@ class PPOAlgorithm(BaseAlgorithm):
         vf_loss_epoch /= nupdate
         entropy_epoch /= nupdate
         phase_vf_loss_epoch /= nupdate
+        short_reward_loss_epoch /= nupdate
 
         # Define train stats
         train_stats = {
@@ -106,5 +120,7 @@ class PPOAlgorithm(BaseAlgorithm):
         }
         if self.phase_vf_loss_coef > 0:
             train_stats["phase_vf_loss"] = phase_vf_loss_epoch
+        if self.short_reward_loss_coef > 0:
+            train_stats["short_reward_loss"] = short_reward_loss_epoch
 
         return train_stats

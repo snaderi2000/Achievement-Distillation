@@ -22,6 +22,7 @@ class PPOModel(BaseModel):
         action_head_kwargs: Dict = {},
         mse_head_kwargs: Dict = {},
         use_phase_vf_head: bool = False,
+        use_short_reward_head: bool = False,
     ):
         super().__init__(observation_space, action_space)
 
@@ -59,6 +60,18 @@ class PPOModel(BaseModel):
                 insize=hidsize,
                 outsize=1,
             )
+        self.use_short_reward_head = use_short_reward_head
+        if use_short_reward_head:
+            self.short_reward_mlp = FanInInitReLULayer(
+                hidsize,
+                hidsize // 2,
+                layer_type="linear",
+                **dense_init_norm_kwargs,
+            )
+            self.short_reward_head = PlainMSEHead(
+                insize=hidsize // 2,
+                outsize=1,
+            )
 
     @th.no_grad()
     def act(self, obs: th.Tensor, **kwargs) -> Dict[str, th.Tensor]:
@@ -93,6 +106,11 @@ class PPOModel(BaseModel):
         pi_logits = self.pi_head(pi_latents)
         vpreds = self.vf_head(vf_latents)
         phase_vpreds = self.phase_vf_head(vf_latents) if self.use_phase_vf_head else None
+        short_reward_preds = (
+            self.short_reward_head(self.short_reward_mlp(latents))
+            if self.use_short_reward_head
+            else None
+        )
 
         # Define outputs
         outputs = {
@@ -104,6 +122,8 @@ class PPOModel(BaseModel):
         }
         if phase_vpreds is not None:
             outputs["phase_vpreds"] = phase_vpreds
+        if short_reward_preds is not None:
+            outputs["short_reward_preds"] = short_reward_preds
 
         return outputs
 
@@ -124,6 +144,8 @@ class PPOModel(BaseModel):
         clip_param: float = 0.2,
         phase_ids: th.Tensor | None = None,
         phase_mask: th.Tensor | None = None,
+        short_reward_targets: th.Tensor | None = None,
+        short_reward_mask: th.Tensor | None = None,
         **kwargs,
     ) -> Dict[str, th.Tensor]:
         # Pass through model
@@ -160,6 +182,17 @@ class PPOModel(BaseModel):
                         phase_targets[valid_mask],
                     ).mean()
             losses["phase_vf_loss"] = phase_vf_loss
+        if self.use_short_reward_head:
+            short_reward_loss = th.zeros((), device=vtargs.device)
+            if short_reward_targets is not None and short_reward_mask is not None:
+                valid_mask = short_reward_mask.bool()
+                if valid_mask.any():
+                    short_reward_preds = outputs["short_reward_preds"]
+                    short_reward_loss = self.short_reward_head.mse_loss(
+                        short_reward_preds[valid_mask],
+                        short_reward_targets[valid_mask],
+                    ).mean()
+            losses["short_reward_loss"] = short_reward_loss
 
         return losses
 

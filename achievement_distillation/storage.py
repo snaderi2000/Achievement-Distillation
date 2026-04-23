@@ -154,6 +154,36 @@ class RolloutStorage:
 
         return phase_ids, phase_mask
 
+    def get_short_reward_targets(self, horizon: int):
+        short_targets = th.zeros((self.nstep, self.nproc, 1), device=self.device)
+        short_mask = th.zeros((self.nstep, self.nproc, 1), device=self.device).bool()
+
+        if horizon <= 0:
+            return short_targets, short_mask
+
+        for env_idx in range(self.nproc):
+            rewards = self.rewards[:, env_idx, 0]
+            next_masks = self.masks[1:, env_idx, 0]
+            for step in range(self.nstep):
+                target = rewards.new_zeros(())
+                terminated = False
+                for offset in range(horizon):
+                    future_step = step + offset
+                    if future_step >= self.nstep:
+                        break
+                    target = target + rewards[future_step]
+                    if next_masks[future_step] == 0:
+                        terminated = True
+                        break
+
+                # Exact target if we saw the full horizon in-buffer, or the episode ended
+                # before the horizon elapsed.
+                if step + horizon <= self.nstep or terminated:
+                    short_targets[step, env_idx, 0] = target
+                    short_mask[step, env_idx, 0] = True
+
+        return short_targets, short_mask
+
     def compute_returns(self, gamma: float, gae_lambda: float):
         # Compute returns
         gae = 0
@@ -170,7 +200,11 @@ class RolloutStorage:
         # Compute advantages
         self.advs = (self.advs - self.advs.mean()) / (self.advs.std() + 1e-8)
 
-    def get_data_loader(self, nbatch: int) -> Iterator[Dict[str, th.Tensor]]:
+    def get_data_loader(
+        self,
+        nbatch: int,
+        short_reward_horizon: int = 0,
+    ) -> Iterator[Dict[str, th.Tensor]]:
         # Get sampler
         ndata = self.nstep * self.nproc
         assert ndata >= nbatch
@@ -188,6 +222,9 @@ class RolloutStorage:
         phase_ids, phase_mask = self.get_phase_labels()
         phase_ids = phase_ids.view(-1, 1)
         phase_mask = phase_mask.view(-1, 1)
+        short_reward_targets, short_reward_mask = self.get_short_reward_targets(short_reward_horizon)
+        short_reward_targets = short_reward_targets.view(-1, 1)
+        short_reward_mask = short_reward_mask.view(-1, 1)
 
         for indices in sampler:
             batch = {
@@ -199,6 +236,8 @@ class RolloutStorage:
                 "advs": advs[indices],
                 "phase_ids": phase_ids[indices],
                 "phase_mask": phase_mask[indices],
+                "short_reward_targets": short_reward_targets[indices],
+                "short_reward_mask": short_reward_mask[indices],
             }
             yield batch
 
