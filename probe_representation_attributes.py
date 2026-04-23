@@ -22,6 +22,9 @@ from achievement_distillation.model import *
 from achievement_distillation.wrapper import VecPyTorch
 
 
+POSITIVE_REWARD_HORIZON = 10
+
+
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
@@ -145,6 +148,15 @@ def current_water_labels(env: Env, water_ids: set[int]) -> Dict[str, int]:
     return labels
 
 
+def positive_reward_labels(rewards: Iterable[float], horizon: int = POSITIVE_REWARD_HORIZON) -> list[int]:
+    rewards = list(rewards)
+    labels = []
+    for step in range(len(rewards)):
+        future_rewards = rewards[step : step + horizon]
+        labels.append(int(any(reward > 0 for reward in future_rewards)))
+    return labels
+
+
 def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
     model, config, ckpt_path = instantiate_model(
         args.collect_exp_name,
@@ -173,6 +185,7 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
     water_ne_labels = []
     water_sw_labels = []
     water_se_labels = []
+    positive_reward_10_labels = []
     episode_ids = []
     step_ids = []
 
@@ -184,20 +197,29 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
 
         done = False
         step_idx = 0
+        episode_observations = []
+        episode_health_labels = []
+        episode_tree_labels = []
+        episode_water_visible_labels = []
+        episode_water_nw_labels = []
+        episode_water_ne_labels = []
+        episode_water_sw_labels = []
+        episode_water_se_labels = []
+        episode_rewards = []
+        episode_step_ids = []
         while True:
-            observations.append(th.from_numpy(np.transpose(obs, (2, 0, 1))).to(th.uint8))
-            health_labels.append(current_health(env))
-            tree_labels.append(current_tree_count(env, tree_ids))
+            episode_observations.append(th.from_numpy(np.transpose(obs, (2, 0, 1))).to(th.uint8))
+            episode_health_labels.append(current_health(env))
+            episode_tree_labels.append(current_tree_count(env, tree_ids))
             water_labels = current_water_labels(env, water_ids)
-            water_visible_labels.append(water_labels["water_visible"])
-            water_nw_labels.append(water_labels["water_nw"])
-            water_ne_labels.append(water_labels["water_ne"])
-            water_sw_labels.append(water_labels["water_sw"])
-            water_se_labels.append(water_labels["water_se"])
-            episode_ids.append(episode_idx)
-            step_ids.append(step_idx)
+            episode_water_visible_labels.append(water_labels["water_visible"])
+            episode_water_nw_labels.append(water_labels["water_nw"])
+            episode_water_ne_labels.append(water_labels["water_ne"])
+            episode_water_sw_labels.append(water_labels["water_sw"])
+            episode_water_se_labels.append(water_labels["water_se"])
+            episode_step_ids.append(step_idx)
 
-            if args.max_states and len(observations) >= args.max_states:
+            if args.max_states and len(observations) + len(episode_observations) >= args.max_states:
                 done = True
                 break
 
@@ -208,12 +230,34 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
                 if "next_states" in outputs:
                     states = outputs["next_states"]
 
-            obs, _, done, _ = env.step(action)
+            obs, reward, done, _ = env.step(action)
+            episode_rewards.append(float(reward))
             step_idx += 1
             total_steps += 1
 
             if done:
                 break
+
+        episode_positive_reward_10 = positive_reward_labels(
+            episode_rewards,
+            horizon=POSITIVE_REWARD_HORIZON,
+        )
+        if len(episode_positive_reward_10) < len(episode_observations):
+            episode_positive_reward_10.extend(
+                [0] * (len(episode_observations) - len(episode_positive_reward_10))
+            )
+
+        observations.extend(episode_observations)
+        health_labels.extend(episode_health_labels)
+        tree_labels.extend(episode_tree_labels)
+        water_visible_labels.extend(episode_water_visible_labels)
+        water_nw_labels.extend(episode_water_nw_labels)
+        water_ne_labels.extend(episode_water_ne_labels)
+        water_sw_labels.extend(episode_water_sw_labels)
+        water_se_labels.extend(episode_water_se_labels)
+        positive_reward_10_labels.extend(episode_positive_reward_10)
+        episode_ids.extend([episode_idx] * len(episode_observations))
+        step_ids.extend(episode_step_ids)
 
         print(
             f"[collect] episode={episode_idx + 1}/{args.num_episodes} "
@@ -233,6 +277,7 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
         "water_ne": th.tensor(water_ne_labels, dtype=th.long),
         "water_sw": th.tensor(water_sw_labels, dtype=th.long),
         "water_se": th.tensor(water_se_labels, dtype=th.long),
+        "positive_reward_10": th.tensor(positive_reward_10_labels, dtype=th.long),
         "episode_ids": th.tensor(episode_ids, dtype=th.long),
         "step_ids": th.tensor(step_ids, dtype=th.long),
         "metadata": {
@@ -242,6 +287,7 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
             "collect_ckpt_epoch": args.collect_ckpt_epoch,
             "eval_seed": args.eval_seed,
             "num_episodes": args.num_episodes,
+            "positive_reward_horizon": POSITIVE_REWARD_HORIZON,
             "tree_ids": sorted(tree_ids),
             "water_ids": sorted(water_ids),
         },
@@ -250,7 +296,8 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
         f"Collected {dataset['observations'].shape[0]} states. "
         f"Health range: {dataset['health'].min().item()}-{dataset['health'].max().item()}, "
         f"tree_count range: {dataset['tree_count'].min().item()}-{dataset['tree_count'].max().item()}, "
-        f"water_visible positives: {int(dataset['water_visible'].sum().item())}"
+        f"water_visible positives: {int(dataset['water_visible'].sum().item())}, "
+        f"positive_reward_10 positives: {int(dataset['positive_reward_10'].sum().item())}"
     )
     return dataset
 
@@ -311,6 +358,19 @@ def extract_latents(model, observations: th.Tensor, device: th.device, batch_siz
     return th.cat(latents, dim=0)
 
 
+class MLPProbe(nn.Module):
+    def __init__(self, insize: int, num_classes: int, hidden_size: int = 512):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(insize, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, num_classes),
+        )
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        return self.net(x)
+
+
 def train_probe(
     X_train_latents: th.Tensor,
     y_train: th.Tensor,
@@ -321,8 +381,14 @@ def train_probe(
     epochs: int,
     batch_size: int,
     seed: int,
+    probe_type: str,
 ):
-    classifier = nn.Linear(X_train_latents.shape[1], num_classes).to(device)
+    if probe_type == "linear":
+        classifier = nn.Linear(X_train_latents.shape[1], num_classes).to(device)
+    elif probe_type == "mlp":
+        classifier = MLPProbe(X_train_latents.shape[1], num_classes).to(device)
+    else:
+        raise ValueError(f"Unsupported probe_type: {probe_type}")
     optimizer = optim.Adam(classifier.parameters(), lr=1e-3)
 
     class_counts = np.bincount(y_train.numpy(), minlength=num_classes)
@@ -348,7 +414,7 @@ def train_probe(
             loss.backward()
             optimizer.step()
         if (epoch + 1) % max(epochs // 5, 1) == 0 or epoch == 0:
-            print(f"[probe] epoch={epoch + 1}/{epochs}")
+            print(f"[probe-{probe_type}] epoch={epoch + 1}/{epochs}")
 
     classifier.eval()
     preds = []
@@ -381,8 +447,23 @@ def main():
     parser.add_argument(
         "--target",
         type=str,
-        choices=("health", "tree_count", "water_visible", "water_nw", "water_ne", "water_sw", "water_se"),
+        choices=(
+            "health",
+            "tree_count",
+            "water_visible",
+            "water_nw",
+            "water_ne",
+            "water_sw",
+            "water_se",
+            "positive_reward_10",
+        ),
         default="health",
+    )
+    parser.add_argument(
+        "--probe_type",
+        type=str,
+        choices=("linear", "mlp", "both"),
+        default="linear",
     )
     parser.add_argument("--tree_count_cap", type=int, default=None, help="Optionally cap tree counts into a final bucket.")
     parser.add_argument("--train_size", type=int, default=50000)
@@ -417,6 +498,12 @@ def main():
             th.save(dataset, args.output_dataset_path)
             print(f"Saved dataset to {args.output_dataset_path}")
 
+    if args.target not in dataset:
+        raise KeyError(
+            f"Target '{args.target}' not found in dataset. "
+            "If this is an older dataset, recollect it with the updated script."
+        )
+
     observations = dataset["observations"]
     labels = dataset[args.target].clone()
     if args.target == "tree_count":
@@ -448,29 +535,36 @@ def main():
     X_test_latents = extract_latents(model, X_test, device, args.extract_batch_size)
     print(f"Latent shapes: train={tuple(X_train_latents.shape)}, test={tuple(X_test_latents.shape)}")
 
-    y_true, y_pred = train_probe(
-        X_train_latents,
-        y_train,
-        X_test_latents,
-        y_test,
-        num_classes=len(class_to_value),
-        device=device,
-        epochs=args.probe_epochs,
-        batch_size=args.probe_batch_size,
-        seed=args.probe_seed,
-    )
-
-    accuracy = float(accuracy_score(y_true, y_pred))
-    print(f"Probe accuracy: {accuracy:.4f}")
+    probe_types = ["linear", "mlp"] if args.probe_type == "both" else [args.probe_type]
+    all_results = {}
     class_names = [str(class_to_value[idx]) for idx in range(len(class_to_value))]
-    print(classification_report(y_true, y_pred, target_names=class_names, zero_division=0))
-    print("Confusion matrix:")
-    print(confusion_matrix(y_true, y_pred))
+
+    for probe_type in probe_types:
+        y_true, y_pred = train_probe(
+            X_train_latents,
+            y_train,
+            X_test_latents,
+            y_test,
+            num_classes=len(class_to_value),
+            device=device,
+            epochs=args.probe_epochs,
+            batch_size=args.probe_batch_size,
+            seed=args.probe_seed,
+            probe_type=probe_type,
+        )
+
+        accuracy = float(accuracy_score(y_true, y_pred))
+        print(f"{probe_type.upper()} probe accuracy: {accuracy:.4f}")
+        print(classification_report(y_true, y_pred, target_names=class_names, zero_division=0))
+        print("Confusion matrix:")
+        print(confusion_matrix(y_true, y_pred))
+        all_results[probe_type] = {"accuracy": accuracy}
 
     if args.results_json_path:
         results = {
             "target": args.target,
-            "accuracy": accuracy,
+            "probe_type": args.probe_type,
+            "results": all_results,
             "class_to_value": class_to_value,
             "analysis_exp_name": args.analysis_exp_name,
             "analysis_timestamp": args.analysis_timestamp,
