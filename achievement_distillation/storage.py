@@ -154,6 +154,15 @@ class RolloutStorage:
 
         return phase_ids, phase_mask
 
+    def get_progress_bins(self, num_bins: int = 4):
+        success_counts = self.successes[:-1].sum(dim=-1, keepdim=True).long()
+        if num_bins <= 1:
+            return th.zeros_like(success_counts)
+        max_successes = self.successes.shape[-1]
+        progress_bins = (success_counts * num_bins) // max_successes
+        progress_bins = th.clamp(progress_bins, max=num_bins - 1)
+        return progress_bins
+
     def get_short_reward_targets(self, horizon: int):
         short_targets = th.zeros((self.nstep, self.nproc, 1), device=self.device)
         short_mask = th.zeros((self.nstep, self.nproc, 1), device=self.device).bool()
@@ -204,6 +213,8 @@ class RolloutStorage:
         self,
         nbatch: int,
         short_reward_horizon: int = 0,
+        num_phase_bins: int = 4,
+        num_progress_bins: int = 4,
     ) -> Iterator[Dict[str, th.Tensor]]:
         # Get sampler
         ndata = self.nstep * self.nproc
@@ -219,9 +230,10 @@ class RolloutStorage:
         vtargs = self.returns.view(-1, *self.returns.shape[2:])
         log_probs = self.log_probs.view(-1, *self.log_probs.shape[2:])
         advs = self.advs.view(-1, *self.advs.shape[2:])
-        phase_ids, phase_mask = self.get_phase_labels()
+        phase_ids, phase_mask = self.get_phase_labels(num_phase_bins)
         phase_ids = phase_ids.view(-1, 1)
         phase_mask = phase_mask.view(-1, 1)
+        progress_bins = self.get_progress_bins(num_progress_bins).view(-1, 1)
         short_reward_targets, short_reward_mask = self.get_short_reward_targets(short_reward_horizon)
         short_reward_targets = short_reward_targets.view(-1, 1)
         short_reward_mask = short_reward_mask.view(-1, 1)
@@ -236,6 +248,7 @@ class RolloutStorage:
                 "advs": advs[indices],
                 "phase_ids": phase_ids[indices],
                 "phase_mask": phase_mask[indices],
+                "progress_bins": progress_bins[indices],
                 "short_reward_targets": short_reward_targets[indices],
                 "short_reward_mask": short_reward_mask[indices],
             }

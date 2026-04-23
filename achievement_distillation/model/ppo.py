@@ -144,8 +144,13 @@ class PPOModel(BaseModel):
         clip_param: float = 0.2,
         phase_ids: th.Tensor | None = None,
         phase_mask: th.Tensor | None = None,
+        progress_bins: th.Tensor | None = None,
         short_reward_targets: th.Tensor | None = None,
         short_reward_mask: th.Tensor | None = None,
+        rank_margin: float = 0.05,
+        rank_delta: float = 0.1,
+        rank_max_pairs_per_group: int = 8,
+        rank_num_progress_bins: int = 4,
         **kwargs,
     ) -> Dict[str, th.Tensor]:
         # Pass through model
@@ -167,6 +172,17 @@ class PPOModel(BaseModel):
 
         # Define losses
         losses = {"pi_loss": pi_loss, "vf_loss": vf_loss, "entropy": entropy}
+        rank_loss = self.compute_rank_loss(
+            vpreds=vpreds,
+            vtargs=vtargs,
+            phase_ids=phase_ids,
+            progress_bins=progress_bins,
+            rank_margin=rank_margin,
+            rank_delta=rank_delta,
+            rank_max_pairs_per_group=rank_max_pairs_per_group,
+            rank_num_progress_bins=rank_num_progress_bins,
+        )
+        losses["rank_loss"] = rank_loss
         if self.use_phase_vf_head:
             phase_vf_loss = th.zeros((), device=vtargs.device)
             if phase_ids is not None and phase_mask is not None:
@@ -195,6 +211,67 @@ class PPOModel(BaseModel):
             losses["short_reward_loss"] = short_reward_loss
 
         return losses
+
+    def compute_rank_loss(
+        self,
+        vpreds: th.Tensor,
+        vtargs: th.Tensor,
+        phase_ids: th.Tensor | None,
+        progress_bins: th.Tensor | None,
+        rank_margin: float,
+        rank_delta: float,
+        rank_max_pairs_per_group: int,
+        rank_num_progress_bins: int,
+    ) -> th.Tensor:
+        if phase_ids is None or progress_bins is None:
+            return vpreds.new_zeros(())
+
+        pred_values = self.vf_head.denormalize(vpreds).squeeze(-1)
+        target_values = vtargs.squeeze(-1)
+        phase_values = phase_ids.squeeze(-1)
+        progress_values = progress_bins.squeeze(-1)
+
+        valid = phase_values >= 0
+        if not valid.any():
+            return vpreds.new_zeros(())
+
+        device = vpreds.device
+        group_ids = phase_values * rank_num_progress_bins + progress_values
+        unique_groups = th.unique(group_ids[valid])
+
+        pair_losses = []
+        for group_id in unique_groups.tolist():
+            group_mask = valid & (group_ids == group_id)
+            group_idx = group_mask.nonzero(as_tuple=False).squeeze(-1)
+            if group_idx.numel() < 2:
+                continue
+
+            perm = group_idx[th.randperm(group_idx.numel(), device=device)]
+            npairs = min(perm.numel() // 2, rank_max_pairs_per_group)
+            if npairs == 0:
+                continue
+
+            left_idx = perm[: 2 * npairs : 2]
+            right_idx = perm[1 : 2 * npairs : 2]
+            left_targ = target_values[left_idx]
+            right_targ = target_values[right_idx]
+            gap = left_targ - right_targ
+            keep = gap.abs() > rank_delta
+            if not keep.any():
+                continue
+
+            left_idx = left_idx[keep]
+            right_idx = right_idx[keep]
+            gap = gap[keep]
+
+            winners = th.where(gap > 0, left_idx, right_idx)
+            losers = th.where(gap > 0, right_idx, left_idx)
+            margin_gap = pred_values[winners] - pred_values[losers]
+            pair_losses.append(th.relu(rank_margin - margin_gap))
+
+        if not pair_losses:
+            return vpreds.new_zeros(())
+        return th.cat(pair_losses).mean()
 
     def compute_phase_normalized_targets(
         self,

@@ -21,6 +21,12 @@ class PPOAlgorithm(BaseAlgorithm):
         phase_vf_loss_coef: float = 0.0,
         short_reward_loss_coef: float = 0.0,
         short_reward_horizon: int = 0,
+        rank_loss_coef: float = 0.0,
+        rank_margin: float = 0.05,
+        rank_delta: float = 0.1,
+        rank_num_phase_bins: int = 4,
+        rank_num_progress_bins: int = 4,
+        rank_max_pairs_per_group: int = 8,
     ):
         super().__init__(model)
         self.model: PPOModel
@@ -35,6 +41,12 @@ class PPOAlgorithm(BaseAlgorithm):
         self.phase_vf_loss_coef = phase_vf_loss_coef
         self.short_reward_loss_coef = short_reward_loss_coef
         self.short_reward_horizon = short_reward_horizon
+        self.rank_loss_coef = rank_loss_coef
+        self.rank_margin = rank_margin
+        self.rank_delta = rank_delta
+        self.rank_num_phase_bins = rank_num_phase_bins
+        self.rank_num_progress_bins = rank_num_progress_bins
+        self.rank_max_pairs_per_group = rank_max_pairs_per_group
 
         # Optimizer
         if hasattr(model, "get_param_groups"):
@@ -62,6 +74,7 @@ class PPOAlgorithm(BaseAlgorithm):
         entropy_epoch = 0
         phase_vf_loss_epoch = 0
         short_reward_loss_epoch = 0
+        rank_loss_epoch = 0
         nupdate = 0
 
         for _ in range(self.ppo_nepoch):
@@ -69,11 +82,20 @@ class PPOAlgorithm(BaseAlgorithm):
             data_loader = storage.get_data_loader(
                 self.ppo_nbatch,
                 short_reward_horizon=self.short_reward_horizon,
+                num_phase_bins=self.rank_num_phase_bins,
+                num_progress_bins=self.rank_num_progress_bins,
             )
 
             for batch in data_loader:
                 # Compute loss
-                losses = self.model.compute_losses(**batch, clip_param=self.clip_param)
+                losses = self.model.compute_losses(
+                    **batch,
+                    clip_param=self.clip_param,
+                    rank_margin=self.rank_margin,
+                    rank_delta=self.rank_delta,
+                    rank_max_pairs_per_group=self.rank_max_pairs_per_group,
+                    rank_num_progress_bins=self.rank_num_progress_bins,
+                )
                 pi_loss = losses["pi_loss"]
                 vf_loss = losses["vf_loss"]
                 entropy = losses["entropy"]
@@ -83,11 +105,15 @@ class PPOAlgorithm(BaseAlgorithm):
                 short_reward_loss = losses.get("short_reward_loss")
                 if short_reward_loss is None:
                     short_reward_loss = pi_loss.new_zeros(())
+                rank_loss = losses.get("rank_loss")
+                if rank_loss is None:
+                    rank_loss = pi_loss.new_zeros(())
                 loss = (
                     pi_loss
                     + self.vf_loss_coef * vf_loss
                     + self.phase_vf_loss_coef * phase_vf_loss
                     + self.short_reward_loss_coef * short_reward_loss
+                    + self.rank_loss_coef * rank_loss
                     - self.ent_coef * entropy
                 )
 
@@ -103,6 +129,7 @@ class PPOAlgorithm(BaseAlgorithm):
                 entropy_epoch += entropy.item()
                 phase_vf_loss_epoch += phase_vf_loss.item()
                 short_reward_loss_epoch += short_reward_loss.item()
+                rank_loss_epoch += rank_loss.item()
                 nupdate += 1
 
         # Compute average stats
@@ -111,6 +138,7 @@ class PPOAlgorithm(BaseAlgorithm):
         entropy_epoch /= nupdate
         phase_vf_loss_epoch /= nupdate
         short_reward_loss_epoch /= nupdate
+        rank_loss_epoch /= nupdate
 
         # Define train stats
         train_stats = {
@@ -122,5 +150,7 @@ class PPOAlgorithm(BaseAlgorithm):
             train_stats["phase_vf_loss"] = phase_vf_loss_epoch
         if self.short_reward_loss_coef > 0:
             train_stats["short_reward_loss"] = short_reward_loss_epoch
+        if self.rank_loss_coef > 0:
+            train_stats["rank_loss"] = rank_loss_epoch
 
         return train_stats
