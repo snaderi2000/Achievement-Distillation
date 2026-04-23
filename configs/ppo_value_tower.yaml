@@ -9,7 +9,7 @@ gae_lambda: 0.65
 model_cls: PPOValueTowerModel
 model_kwargs:
   hidsize: 1024
-  value_hidsize: 1024
+  value_hidsize: 128
   impala_kwargs:
     chans: [64, 128, 128]
     outsize: 256

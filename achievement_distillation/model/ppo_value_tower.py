@@ -47,14 +47,8 @@ class PPOValueTowerModel(BaseModel):
             **action_head_kwargs,
         )
 
-        self.vf_tower_1 = FanInInitReLULayer(
+        self.vf_tower = FanInInitReLULayer(
             hidsize,
-            value_hidsize,
-            layer_type="linear",
-            **dense_init_norm_kwargs,
-        )
-        self.vf_tower_2 = FanInInitReLULayer(
-            value_hidsize,
             value_hidsize,
             layer_type="linear",
             **dense_init_norm_kwargs,
@@ -79,7 +73,7 @@ class PPOValueTowerModel(BaseModel):
     def forward(self, obs: th.Tensor, **kwargs) -> Dict[str, th.Tensor]:
         latents = self.encode(obs)
         pi_latents = latents
-        vf_latents = self.vf_tower_2(self.vf_tower_1(latents))
+        vf_latents = self.vf_tower(latents)
         pi_logits = self.pi_head(pi_latents)
         vpreds = self.vf_head(vf_latents)
         return {
