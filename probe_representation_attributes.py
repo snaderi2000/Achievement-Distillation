@@ -102,6 +102,13 @@ def current_health(env: Env) -> int:
     return int(inventory["health"])
 
 
+def current_drink(env: Env) -> int:
+    inventory = getattr(getattr(env, "_player", None), "inventory", None)
+    if inventory is None or "drink" not in inventory:
+        raise RuntimeError("Could not read current drink from env._player.inventory['drink'].")
+    return int(inventory["drink"])
+
+
 def current_visible_semantic(env: Env) -> np.ndarray:
     if not hasattr(env, "_sem_view"):
         raise RuntimeError("Could not access Crafter semantic view via env._sem_view.")
@@ -157,6 +164,16 @@ def positive_reward_labels(rewards: Iterable[float], horizon: int = POSITIVE_REW
     return labels
 
 
+def drink_increase_labels(drink_values: Iterable[int], horizon: int = POSITIVE_REWARD_HORIZON) -> list[int]:
+    drink_values = list(drink_values)
+    labels = []
+    for step in range(len(drink_values)):
+        current = drink_values[step]
+        future_values = drink_values[step + 1 : step + horizon + 1]
+        labels.append(int(any(value > current for value in future_values)))
+    return labels
+
+
 def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
     model, config, ckpt_path = instantiate_model(
         args.collect_exp_name,
@@ -180,12 +197,14 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
     observations = []
     health_labels = []
     tree_labels = []
+    drink_labels = []
     water_visible_labels = []
     water_nw_labels = []
     water_ne_labels = []
     water_sw_labels = []
     water_se_labels = []
     positive_reward_10_labels = []
+    drink_increase_10_labels = []
     episode_ids = []
     step_ids = []
 
@@ -200,6 +219,7 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
         episode_observations = []
         episode_health_labels = []
         episode_tree_labels = []
+        episode_drink_labels = []
         episode_water_visible_labels = []
         episode_water_nw_labels = []
         episode_water_ne_labels = []
@@ -211,6 +231,7 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
             episode_observations.append(th.from_numpy(np.transpose(obs, (2, 0, 1))).to(th.uint8))
             episode_health_labels.append(current_health(env))
             episode_tree_labels.append(current_tree_count(env, tree_ids))
+            episode_drink_labels.append(current_drink(env))
             water_labels = current_water_labels(env, water_ids)
             episode_water_visible_labels.append(water_labels["water_visible"])
             episode_water_nw_labels.append(water_labels["water_nw"])
@@ -242,6 +263,10 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
             episode_rewards,
             horizon=POSITIVE_REWARD_HORIZON,
         )
+        episode_drink_increase_10 = drink_increase_labels(
+            episode_drink_labels,
+            horizon=POSITIVE_REWARD_HORIZON,
+        )
         if len(episode_positive_reward_10) < len(episode_observations):
             episode_positive_reward_10.extend(
                 [0] * (len(episode_observations) - len(episode_positive_reward_10))
@@ -250,12 +275,14 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
         observations.extend(episode_observations)
         health_labels.extend(episode_health_labels)
         tree_labels.extend(episode_tree_labels)
+        drink_labels.extend(episode_drink_labels)
         water_visible_labels.extend(episode_water_visible_labels)
         water_nw_labels.extend(episode_water_nw_labels)
         water_ne_labels.extend(episode_water_ne_labels)
         water_sw_labels.extend(episode_water_sw_labels)
         water_se_labels.extend(episode_water_se_labels)
         positive_reward_10_labels.extend(episode_positive_reward_10)
+        drink_increase_10_labels.extend(episode_drink_increase_10)
         episode_ids.extend([episode_idx] * len(episode_observations))
         step_ids.extend(episode_step_ids)
 
@@ -272,12 +299,14 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
         "observations": th.stack(observations),
         "health": th.tensor(health_labels, dtype=th.long),
         "tree_count": th.tensor(tree_labels, dtype=th.long),
+        "drink": th.tensor(drink_labels, dtype=th.long),
         "water_visible": th.tensor(water_visible_labels, dtype=th.long),
         "water_nw": th.tensor(water_nw_labels, dtype=th.long),
         "water_ne": th.tensor(water_ne_labels, dtype=th.long),
         "water_sw": th.tensor(water_sw_labels, dtype=th.long),
         "water_se": th.tensor(water_se_labels, dtype=th.long),
         "positive_reward_10": th.tensor(positive_reward_10_labels, dtype=th.long),
+        "drink_increase_10": th.tensor(drink_increase_10_labels, dtype=th.long),
         "episode_ids": th.tensor(episode_ids, dtype=th.long),
         "step_ids": th.tensor(step_ids, dtype=th.long),
         "metadata": {
@@ -297,7 +326,8 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
         f"Health range: {dataset['health'].min().item()}-{dataset['health'].max().item()}, "
         f"tree_count range: {dataset['tree_count'].min().item()}-{dataset['tree_count'].max().item()}, "
         f"water_visible positives: {int(dataset['water_visible'].sum().item())}, "
-        f"positive_reward_10 positives: {int(dataset['positive_reward_10'].sum().item())}"
+        f"positive_reward_10 positives: {int(dataset['positive_reward_10'].sum().item())}, "
+        f"drink_increase_10 positives: {int(dataset['drink_increase_10'].sum().item())}"
     )
     return dataset
 
@@ -456,6 +486,7 @@ def main():
             "water_sw",
             "water_se",
             "positive_reward_10",
+            "drink_increase_10",
         ),
         default="health",
     )
