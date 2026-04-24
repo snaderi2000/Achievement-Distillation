@@ -174,6 +174,16 @@ def drink_increase_labels(drink_values: Iterable[int], horizon: int = POSITIVE_R
     return labels
 
 
+def health_decrease_labels(health_values: Iterable[int], horizon: int = POSITIVE_REWARD_HORIZON) -> list[int]:
+    health_values = list(health_values)
+    labels = []
+    for step in range(len(health_values)):
+        current = health_values[step]
+        future_values = health_values[step + 1 : step + horizon + 1]
+        labels.append(int(any(value < current for value in future_values)))
+    return labels
+
+
 def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
     model, config, ckpt_path = instantiate_model(
         args.collect_exp_name,
@@ -205,6 +215,7 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
     water_se_labels = []
     positive_reward_10_labels = []
     drink_increase_10_labels = []
+    health_decrease_10_labels = []
     episode_ids = []
     step_ids = []
 
@@ -267,6 +278,10 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
             episode_drink_labels,
             horizon=POSITIVE_REWARD_HORIZON,
         )
+        episode_health_decrease_10 = health_decrease_labels(
+            episode_health_labels,
+            horizon=POSITIVE_REWARD_HORIZON,
+        )
         if len(episode_positive_reward_10) < len(episode_observations):
             episode_positive_reward_10.extend(
                 [0] * (len(episode_observations) - len(episode_positive_reward_10))
@@ -283,6 +298,7 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
         water_se_labels.extend(episode_water_se_labels)
         positive_reward_10_labels.extend(episode_positive_reward_10)
         drink_increase_10_labels.extend(episode_drink_increase_10)
+        health_decrease_10_labels.extend(episode_health_decrease_10)
         episode_ids.extend([episode_idx] * len(episode_observations))
         step_ids.extend(episode_step_ids)
 
@@ -307,6 +323,7 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
         "water_se": th.tensor(water_se_labels, dtype=th.long),
         "positive_reward_10": th.tensor(positive_reward_10_labels, dtype=th.long),
         "drink_increase_10": th.tensor(drink_increase_10_labels, dtype=th.long),
+        "health_decrease_10": th.tensor(health_decrease_10_labels, dtype=th.long),
         "episode_ids": th.tensor(episode_ids, dtype=th.long),
         "step_ids": th.tensor(step_ids, dtype=th.long),
         "metadata": {
@@ -327,7 +344,8 @@ def collect_dataset(args, device: th.device) -> Dict[str, th.Tensor]:
         f"tree_count range: {dataset['tree_count'].min().item()}-{dataset['tree_count'].max().item()}, "
         f"water_visible positives: {int(dataset['water_visible'].sum().item())}, "
         f"positive_reward_10 positives: {int(dataset['positive_reward_10'].sum().item())}, "
-        f"drink_increase_10 positives: {int(dataset['drink_increase_10'].sum().item())}"
+        f"drink_increase_10 positives: {int(dataset['drink_increase_10'].sum().item())}, "
+        f"health_decrease_10 positives: {int(dataset['health_decrease_10'].sum().item())}"
     )
     return dataset
 
@@ -487,6 +505,7 @@ def main():
             "water_se",
             "positive_reward_10",
             "drink_increase_10",
+            "health_decrease_10",
         ),
         default="health",
     )
