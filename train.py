@@ -117,7 +117,12 @@ def main(args):
 
     for epoch in range(1, config["nepoch"] + 1):
         # Sample episodes
-        rollout_stats = sample_rollouts(venv, model, storage)
+        rollout_stats = sample_rollouts(
+            venv,
+            model,
+            storage,
+            progress_bonus_beta=config.get("progress_bonus_beta", 0.0),
+        )
 
         # Compute returns
         storage.compute_returns(config["gamma"], config["gae_lambda"])

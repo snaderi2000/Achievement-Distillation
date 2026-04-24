@@ -47,6 +47,7 @@ class RolloutStorage:
         self.states = th.zeros(nstep + 1, nproc, hidsize, device=device)
         self.vitals = th.zeros(nstep + 1, nproc, 4, device=device)
         self.done_episode_lengths = th.zeros(nstep, nproc, 1, device=device).long()
+        self.progress_bonus_counts = th.zeros(23, device=device).float()
 
         # Step
         self.step = 0

@@ -10,6 +10,7 @@ def sample_rollouts(
     venv: VecPyTorch,
     model: BaseModel,
     storage: RolloutStorage,
+    progress_bonus_beta: float = 0.0,
 ) -> Dict[str, np.ndarray]:
     # Set model to eval model
     model.eval()
@@ -19,6 +20,7 @@ def sample_rollouts(
     episode_lengths = []
     achievements = []
     successes = []
+    intrinsic_reward_sums = []
  
 
 
@@ -46,11 +48,23 @@ def sample_rollouts(
             # 4. Add to outputs. Storage will only save this if 'insert' accepts it.
             outputs["vitals"] = all_vitals
 
+        intrinsic_rewards = th.zeros_like(rewards)
+        if progress_bonus_beta > 0:
+            progress_counts = infos["successes"].sum(dim=-1).long().clamp(
+                min=0,
+                max=storage.progress_bonus_counts.shape[0] - 1,
+            )
+            storage.progress_bonus_counts[progress_counts] += 1.0
+            intrinsic_rewards = progress_bonus_beta / th.sqrt(
+                storage.progress_bonus_counts[progress_counts].unsqueeze(-1)
+            )
+
         outputs["obs"] = obs
-        outputs["rewards"] = rewards
+        outputs["rewards"] = rewards + intrinsic_rewards
         outputs["masks"] = 1.0 - dones
         outputs["successes"] = infos["successes"]
         outputs["episode_lengths"] = infos["episode_lengths"]
+        intrinsic_reward_sums.append(intrinsic_rewards.mean().item())
 
 
         # Update storage
@@ -95,6 +109,7 @@ def sample_rollouts(
         "episode_rewards": episode_rewards,
         "achievements": achievements,
         "successes": successes,
+        "intrinsic_reward_mean": float(np.mean(intrinsic_reward_sums)) if intrinsic_reward_sums else 0.0,
     }
 
     return rollout_stats
