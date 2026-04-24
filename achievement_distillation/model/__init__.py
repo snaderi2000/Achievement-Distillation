@@ -3,6 +3,7 @@ from .ppo import PPOModel
 from .ppo_ad import PPOADModel
 from .ppo_baseline import PPOModelBaseline
 from .ppo_dino import PPODinoModel
+from .ppo_gru import PPOGRUModel
 from .ppo_impoola import PPOImpoolaModel
 from .ppo_impala_slots import PPOImpalaSlotsModel
 from .ppo_impala_dino_hybrid import PPOImpalaDinoHybridModel
