@@ -208,6 +208,42 @@ class RolloutStorage:
 
         return short_targets, short_mask
 
+    def get_health_event_targets(self, horizon: int, reward_mag: float = 0.1, tol: float = 0.05):
+        decrease_targets = th.zeros((self.nstep, self.nproc, 1), device=self.device)
+        increase_targets = th.zeros((self.nstep, self.nproc, 1), device=self.device)
+        event_mask = th.zeros((self.nstep, self.nproc, 1), device=self.device).bool()
+
+        if horizon <= 0:
+            return decrease_targets, increase_targets, event_mask
+
+        lower_pos, upper_pos = reward_mag - tol, reward_mag + tol
+        lower_neg, upper_neg = -reward_mag - tol, -reward_mag + tol
+
+        for env_idx in range(self.nproc):
+            rewards = self.rewards[:, env_idx, 0]
+            next_masks = self.masks[1:, env_idx, 0]
+            for step in range(self.nstep):
+                terminated = False
+                window = []
+                for offset in range(horizon):
+                    future_step = step + offset
+                    if future_step >= self.nstep:
+                        break
+                    reward = rewards[future_step]
+                    window.append(reward)
+                    if next_masks[future_step] == 0:
+                        terminated = True
+                        break
+
+                if step + horizon <= self.nstep or terminated:
+                    if window:
+                        window = th.stack(window)
+                        increase_targets[step, env_idx, 0] = ((window >= lower_pos) & (window <= upper_pos)).any().float()
+                        decrease_targets[step, env_idx, 0] = ((window >= lower_neg) & (window <= upper_neg)).any().float()
+                    event_mask[step, env_idx, 0] = True
+
+        return decrease_targets, increase_targets, event_mask
+
     def compute_returns(self, gamma: float, gae_lambda: float):
         # Compute returns
         gae = 0
@@ -228,6 +264,7 @@ class RolloutStorage:
         self,
         nbatch: int,
         short_reward_horizon: int = 0,
+        health_event_horizon: int = 0,
         num_phase_bins: int = 4,
         num_progress_bins: int = 4,
     ) -> Iterator[Dict[str, th.Tensor]]:
@@ -253,6 +290,10 @@ class RolloutStorage:
         short_reward_targets, short_reward_mask = self.get_short_reward_targets(short_reward_horizon)
         short_reward_targets = short_reward_targets.view(-1, 1)
         short_reward_mask = short_reward_mask.view(-1, 1)
+        health_decrease_targets, health_increase_targets, health_event_mask = self.get_health_event_targets(health_event_horizon)
+        health_decrease_targets = health_decrease_targets.view(-1, 1)
+        health_increase_targets = health_increase_targets.view(-1, 1)
+        health_event_mask = health_event_mask.view(-1, 1)
 
         for indices in sampler:
             batch = {
@@ -268,6 +309,9 @@ class RolloutStorage:
                 "progress_bins": progress_bins[indices],
                 "short_reward_targets": short_reward_targets[indices],
                 "short_reward_mask": short_reward_mask[indices],
+                "health_decrease_targets": health_decrease_targets[indices],
+                "health_increase_targets": health_increase_targets[indices],
+                "health_event_mask": health_event_mask[indices],
             }
             yield batch
 

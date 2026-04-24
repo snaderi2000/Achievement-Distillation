@@ -1,6 +1,7 @@
 from typing import Dict
 
 import torch as th
+import torch.nn.functional as F
 
 from gym import spaces
 
@@ -23,6 +24,7 @@ class PPOModel(BaseModel):
         mse_head_kwargs: Dict = {},
         use_phase_vf_head: bool = False,
         use_short_reward_head: bool = False,
+        use_health_event_heads: bool = False,
     ):
         super().__init__(observation_space, action_space)
 
@@ -72,6 +74,16 @@ class PPOModel(BaseModel):
                 insize=hidsize // 2,
                 outsize=1,
             )
+        self.use_health_event_heads = use_health_event_heads
+        if use_health_event_heads:
+            self.health_decrease_head = PlainMSEHead(
+                insize=hidsize,
+                outsize=1,
+            )
+            self.health_increase_head = PlainMSEHead(
+                insize=hidsize,
+                outsize=1,
+            )
 
     @th.no_grad()
     def act(self, obs: th.Tensor, **kwargs) -> Dict[str, th.Tensor]:
@@ -111,6 +123,12 @@ class PPOModel(BaseModel):
             if self.use_short_reward_head
             else None
         )
+        health_decrease_logits = (
+            self.health_decrease_head(latents) if self.use_health_event_heads else None
+        )
+        health_increase_logits = (
+            self.health_increase_head(latents) if self.use_health_event_heads else None
+        )
 
         # Define outputs
         outputs = {
@@ -124,6 +142,10 @@ class PPOModel(BaseModel):
             outputs["phase_vpreds"] = phase_vpreds
         if short_reward_preds is not None:
             outputs["short_reward_preds"] = short_reward_preds
+        if health_decrease_logits is not None:
+            outputs["health_decrease_logits"] = health_decrease_logits
+        if health_increase_logits is not None:
+            outputs["health_increase_logits"] = health_increase_logits
 
         return outputs
 
@@ -147,6 +169,9 @@ class PPOModel(BaseModel):
         progress_bins: th.Tensor | None = None,
         short_reward_targets: th.Tensor | None = None,
         short_reward_mask: th.Tensor | None = None,
+        health_decrease_targets: th.Tensor | None = None,
+        health_increase_targets: th.Tensor | None = None,
+        health_event_mask: th.Tensor | None = None,
         rank_margin: float = 0.05,
         rank_delta: float = 0.1,
         rank_max_pairs_per_group: int = 8,
@@ -209,6 +234,28 @@ class PPOModel(BaseModel):
                         short_reward_targets[valid_mask],
                     ).mean()
             losses["short_reward_loss"] = short_reward_loss
+        if self.use_health_event_heads:
+            health_decrease_loss = th.zeros((), device=vtargs.device)
+            health_increase_loss = th.zeros((), device=vtargs.device)
+            if (
+                health_decrease_targets is not None
+                and health_increase_targets is not None
+                and health_event_mask is not None
+            ):
+                valid_mask = health_event_mask.bool()
+                if valid_mask.any():
+                    health_decrease_logits = outputs["health_decrease_logits"][valid_mask]
+                    health_increase_logits = outputs["health_increase_logits"][valid_mask]
+                    health_decrease_loss = F.binary_cross_entropy_with_logits(
+                        health_decrease_logits,
+                        health_decrease_targets[valid_mask],
+                    )
+                    health_increase_loss = F.binary_cross_entropy_with_logits(
+                        health_increase_logits,
+                        health_increase_targets[valid_mask],
+                    )
+            losses["health_decrease_loss"] = health_decrease_loss
+            losses["health_increase_loss"] = health_increase_loss
 
         return losses
 
