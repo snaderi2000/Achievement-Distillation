@@ -315,6 +315,33 @@ class RolloutStorage:
             }
             yield batch
 
+    def get_recurrent_data_loader(self, nbatch: int) -> Iterator[Dict[str, th.Tensor]]:
+        assert self.nproc >= nbatch
+        batch_envs = self.nproc // nbatch
+        sampler = SubsetRandomSampler(range(self.nproc))
+        sampler = BatchSampler(sampler, batch_size=batch_envs, drop_last=True)
+
+        obs = self.obs[:-1]
+        actions = self.actions
+        vtargs = self.returns
+        log_probs = self.log_probs
+        advs = self.advs
+        masks = self.masks[1:]
+        init_rnn_states = self.rnn_states[0]
+
+        for env_indices in sampler:
+            env_indices = th.tensor(env_indices, device=self.device, dtype=th.long)
+            batch = {
+                "obs": obs[:, env_indices],
+                "actions": actions[:, env_indices],
+                "vtargs": vtargs[:, env_indices],
+                "log_probs": log_probs[:, env_indices],
+                "advs": advs[:, env_indices],
+                "masks": masks[:, env_indices],
+                "init_rnn_states": init_rnn_states[env_indices],
+            }
+            yield batch
+
     # Load vital states
 
     def get_survival_loader(self, nbatch: int) -> Iterator[Dict[str, th.Tensor]]:

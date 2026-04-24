@@ -74,6 +74,9 @@ class PPOAlgorithm(BaseAlgorithm):
         # Set model to training mode
         self.model.train()
 
+        if getattr(self.model, "use_recurrent_loader", False):
+            return self._update_recurrent(storage)
+
         # Run PPO
         pi_loss_epoch = 0
         vf_loss_epoch = 0
@@ -179,3 +182,41 @@ class PPOAlgorithm(BaseAlgorithm):
             train_stats["rank_loss"] = rank_loss_epoch
 
         return train_stats
+
+    def _update_recurrent(self, storage: RolloutStorage):
+        pi_loss_epoch = 0
+        vf_loss_epoch = 0
+        entropy_epoch = 0
+        nupdate = 0
+
+        for _ in range(self.ppo_nepoch):
+            data_loader = storage.get_recurrent_data_loader(self.ppo_nbatch)
+
+            for batch in data_loader:
+                losses = self.model.compute_losses(
+                    **batch,
+                    clip_param=self.clip_param,
+                )
+                pi_loss = losses["pi_loss"]
+                vf_loss = losses["vf_loss"]
+                entropy = losses["entropy"]
+                loss = pi_loss + self.vf_loss_coef * vf_loss - self.ent_coef * entropy
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                self.optimizer.step()
+
+                pi_loss_epoch += pi_loss.item()
+                vf_loss_epoch += vf_loss.item()
+                entropy_epoch += entropy.item()
+                nupdate += 1
+
+        pi_loss_epoch /= nupdate
+        vf_loss_epoch /= nupdate
+        entropy_epoch /= nupdate
+        return {
+            "pi_loss": pi_loss_epoch,
+            "vf_loss": vf_loss_epoch,
+            "entropy": entropy_epoch,
+        }
