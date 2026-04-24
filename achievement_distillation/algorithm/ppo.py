@@ -1,3 +1,6 @@
+from contextlib import nullcontext
+
+import torch as th
 import torch.nn as nn
 import torch.optim as optim
 
@@ -30,6 +33,8 @@ class PPOAlgorithm(BaseAlgorithm):
         rank_num_phase_bins: int = 4,
         rank_num_progress_bins: int = 4,
         rank_max_pairs_per_group: int = 8,
+        grad_accum_steps: int = 1,
+        use_amp: bool = False,
     ):
         super().__init__(model)
         self.model: PPOModel
@@ -53,6 +58,9 @@ class PPOAlgorithm(BaseAlgorithm):
         self.rank_num_phase_bins = rank_num_phase_bins
         self.rank_num_progress_bins = rank_num_progress_bins
         self.rank_max_pairs_per_group = rank_max_pairs_per_group
+        self.grad_accum_steps = grad_accum_steps
+        self.use_amp = use_amp and th.cuda.is_available()
+        self.scaler = th.amp.GradScaler("cuda", enabled=self.use_amp)
 
         # Optimizer
         if hasattr(model, "get_param_groups"):
@@ -98,50 +106,57 @@ class PPOAlgorithm(BaseAlgorithm):
                 num_progress_bins=self.rank_num_progress_bins,
             )
 
-            for batch in data_loader:
+            self.optimizer.zero_grad()
+            for batch_idx, batch in enumerate(data_loader):
                 # Compute loss
-                losses = self.model.compute_losses(
-                    **batch,
-                    clip_param=self.clip_param,
-                    rank_margin=self.rank_margin,
-                    rank_delta=self.rank_delta,
-                    rank_max_pairs_per_group=self.rank_max_pairs_per_group,
-                    rank_num_progress_bins=self.rank_num_progress_bins,
-                )
-                pi_loss = losses["pi_loss"]
-                vf_loss = losses["vf_loss"]
-                entropy = losses["entropy"]
-                phase_vf_loss = losses.get("phase_vf_loss")
-                if phase_vf_loss is None:
-                    phase_vf_loss = pi_loss.new_zeros(())
-                short_reward_loss = losses.get("short_reward_loss")
-                if short_reward_loss is None:
-                    short_reward_loss = pi_loss.new_zeros(())
-                health_decrease_loss = losses.get("health_decrease_loss")
-                if health_decrease_loss is None:
-                    health_decrease_loss = pi_loss.new_zeros(())
-                health_increase_loss = losses.get("health_increase_loss")
-                if health_increase_loss is None:
-                    health_increase_loss = pi_loss.new_zeros(())
-                rank_loss = losses.get("rank_loss")
-                if rank_loss is None:
-                    rank_loss = pi_loss.new_zeros(())
-                loss = (
-                    pi_loss
-                    + self.vf_loss_coef * vf_loss
-                    + self.phase_vf_loss_coef * phase_vf_loss
-                    + self.short_reward_loss_coef * short_reward_loss
-                    + self.health_decrease_loss_coef * health_decrease_loss
-                    + self.health_increase_loss_coef * health_increase_loss
-                    + self.rank_loss_coef * rank_loss
-                    - self.ent_coef * entropy
-                )
+                with self._autocast_context():
+                    losses = self.model.compute_losses(
+                        **batch,
+                        clip_param=self.clip_param,
+                        rank_margin=self.rank_margin,
+                        rank_delta=self.rank_delta,
+                        rank_max_pairs_per_group=self.rank_max_pairs_per_group,
+                        rank_num_progress_bins=self.rank_num_progress_bins,
+                    )
+                    pi_loss = losses["pi_loss"]
+                    vf_loss = losses["vf_loss"]
+                    entropy = losses["entropy"]
+                    phase_vf_loss = losses.get("phase_vf_loss")
+                    if phase_vf_loss is None:
+                        phase_vf_loss = pi_loss.new_zeros(())
+                    short_reward_loss = losses.get("short_reward_loss")
+                    if short_reward_loss is None:
+                        short_reward_loss = pi_loss.new_zeros(())
+                    health_decrease_loss = losses.get("health_decrease_loss")
+                    if health_decrease_loss is None:
+                        health_decrease_loss = pi_loss.new_zeros(())
+                    health_increase_loss = losses.get("health_increase_loss")
+                    if health_increase_loss is None:
+                        health_increase_loss = pi_loss.new_zeros(())
+                    rank_loss = losses.get("rank_loss")
+                    if rank_loss is None:
+                        rank_loss = pi_loss.new_zeros(())
+                    loss = (
+                        pi_loss
+                        + self.vf_loss_coef * vf_loss
+                        + self.phase_vf_loss_coef * phase_vf_loss
+                        + self.short_reward_loss_coef * short_reward_loss
+                        + self.health_decrease_loss_coef * health_decrease_loss
+                        + self.health_increase_loss_coef * health_increase_loss
+                        + self.rank_loss_coef * rank_loss
+                        - self.ent_coef * entropy
+                    )
 
-                # Update parameter
-                self.optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+                loss = loss / self.grad_accum_steps
+                self.scaler.scale(loss).backward()
+
+                should_step = ((batch_idx + 1) % self.grad_accum_steps == 0) or (batch_idx + 1 == self.ppo_nbatch)
+                if should_step:
+                    self.scaler.unscale_(self.optimizer)
+                    nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.optimizer.zero_grad()
 
                 # Update stats
                 pi_loss_epoch += pi_loss.item()
@@ -192,20 +207,28 @@ class PPOAlgorithm(BaseAlgorithm):
         for _ in range(self.ppo_nepoch):
             data_loader = storage.get_recurrent_data_loader(self.ppo_nbatch)
 
-            for batch in data_loader:
-                losses = self.model.compute_losses(
-                    **batch,
-                    clip_param=self.clip_param,
-                )
-                pi_loss = losses["pi_loss"]
-                vf_loss = losses["vf_loss"]
-                entropy = losses["entropy"]
-                loss = pi_loss + self.vf_loss_coef * vf_loss - self.ent_coef * entropy
+            self.optimizer.zero_grad()
+            for batch_idx, batch in enumerate(data_loader):
+                with self._autocast_context():
+                    losses = self.model.compute_losses(
+                        **batch,
+                        clip_param=self.clip_param,
+                    )
+                    pi_loss = losses["pi_loss"]
+                    vf_loss = losses["vf_loss"]
+                    entropy = losses["entropy"]
+                    loss = pi_loss + self.vf_loss_coef * vf_loss - self.ent_coef * entropy
 
-                self.optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+                loss = loss / self.grad_accum_steps
+                self.scaler.scale(loss).backward()
+
+                should_step = ((batch_idx + 1) % self.grad_accum_steps == 0) or (batch_idx + 1 == self.ppo_nbatch)
+                if should_step:
+                    self.scaler.unscale_(self.optimizer)
+                    nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.optimizer.zero_grad()
 
                 pi_loss_epoch += pi_loss.item()
                 vf_loss_epoch += vf_loss.item()
@@ -220,3 +243,8 @@ class PPOAlgorithm(BaseAlgorithm):
             "vf_loss": vf_loss_epoch,
             "entropy": entropy_epoch,
         }
+
+    def _autocast_context(self):
+        if self.use_amp:
+            return th.amp.autocast("cuda")
+        return nullcontext()

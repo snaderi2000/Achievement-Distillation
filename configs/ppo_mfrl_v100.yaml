@@ -1,0 +1,36 @@
+save_freq: 50
+
+nstep: 96
+nproc: 8
+nepoch: 250
+gamma: 0.925
+gae_lambda: 0.625
+
+model_cls: PPOMFRLModel
+model_kwargs:
+  hidsize: 8192
+  rnn_hidsize: 256
+  head_hidsize: 1536
+  nres_blocks: 2
+  impala_kwargs:
+    chans: [64, 64, 128]
+    outsize: 256
+    nblock: 2
+    post_pool_groups: 1
+    init_norm_kwargs:
+      batch_norm: True
+      group_norm_groups: null
+  dense_init_norm_kwargs:
+    layer_norm: False
+
+algorithm_cls: PPOAlgorithm
+algorithm_kwargs:
+  ppo_nepoch: 4
+  ppo_nbatch: 4
+  clip_param: 0.2
+  vf_loss_coef: 1.0
+  ent_coef: 0.01
+  lr: 4.5e-4
+  max_grad_norm: 0.5
+  grad_accum_steps: 2
+  use_amp: True
