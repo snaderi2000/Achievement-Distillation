@@ -13,6 +13,8 @@ from achievement_distillation.torch_util import FanInInitReLULayer
 
 
 class PPOGRUModel(BaseModel):
+    use_recurrent_loader = True
+
     def __init__(
         self,
         observation_space: spaces.Box,
@@ -113,16 +115,41 @@ class PPOGRUModel(BaseModel):
         log_probs: th.Tensor,
         vtargs: th.Tensor,
         advs: th.Tensor,
+        masks: th.Tensor | None = None,
+        init_rnn_states: th.Tensor | None = None,
         rnn_states: th.Tensor | None = None,
         clip_param: float = 0.2,
         **kwargs,
     ) -> Dict[str, th.Tensor]:
-        outputs = self.forward(obs, rnn_states=rnn_states, **kwargs)
-        pi_logits = outputs["pi_logits"]
+        if obs.dim() == 5:
+            seq_len, batch_size = obs.shape[:2]
+            if init_rnn_states is None:
+                init_rnn_states = th.zeros(batch_size, self.rnn_hidsize, device=obs.device)
+            hidden = init_rnn_states
+            pi_logits_seq = []
+            vpreds_seq = []
+            seq_masks = masks if masks is not None else th.ones(seq_len, batch_size, 1, device=obs.device)
+            for t in range(seq_len):
+                outputs = self.forward(obs[t], rnn_states=hidden, **kwargs)
+                pi_logits_seq.append(outputs["pi_logits"])
+                vpreds_seq.append(outputs["vpreds"])
+                hidden = outputs["next_rnn_states"] * seq_masks[t]
+
+            pi_logits = th.cat(pi_logits_seq, dim=0)
+            vpreds = th.cat(vpreds_seq, dim=0)
+            actions = actions.reshape(seq_len * batch_size, *actions.shape[2:])
+            log_probs = log_probs.reshape(seq_len * batch_size, *log_probs.shape[2:])
+            vtargs = vtargs.reshape(seq_len * batch_size, *vtargs.shape[2:])
+            advs = advs.reshape(seq_len * batch_size, *advs.shape[2:])
+        else:
+            outputs = self.forward(obs, rnn_states=rnn_states, **kwargs)
+            pi_logits = outputs["pi_logits"]
+            vpreds = outputs["vpreds"]
+
         new_log_probs = self.pi_head.log_prob(pi_logits, actions)
         ratio = th.exp(new_log_probs - log_probs)
         ratio_clipped = th.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param)
         pi_loss = -th.min(advs * ratio, advs * ratio_clipped).mean()
         entropy = self.pi_head.entropy(pi_logits).mean()
-        vf_loss = self.vf_head.mse_loss(outputs["vpreds"], vtargs).mean()
+        vf_loss = self.vf_head.mse_loss(vpreds, vtargs).mean()
         return {"pi_loss": pi_loss, "vf_loss": vf_loss, "entropy": entropy}
