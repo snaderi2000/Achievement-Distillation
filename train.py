@@ -32,13 +32,10 @@ def main(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
     th.manual_seed(args.seed)
-    th.cuda.manual_seed_all(args.seed)
-    th.backends.cudnn.benchmark = False
 
-    # CUDA setting
+    # CPU/thread setting. Delay CUDA initialization until after SubprocVecEnv is spawned,
+    # otherwise each worker can inherit a CUDA context and waste GPU memory.
     th.set_num_threads(1)
-    cuda = th.cuda.is_available()
-    device = th.device("cuda:0" if cuda else "cpu")
 
     # Create logger
     group_name = f"{args.exp_name}-{args.timestamp}"
@@ -62,7 +59,19 @@ def main(args):
     # Create environment
     seeds = np.random.randint(0, 2**31 - 1, size=config["nproc"])
     env_fns = [partial(Env, seed=seed) for seed in seeds]
-    venv = SubprocVecEnv(env_fns)
+
+    try:
+        venv = SubprocVecEnv(env_fns, start_method="forkserver")
+    except TypeError:
+        venv = SubprocVecEnv(env_fns)
+
+    # CUDA setting
+    cuda = th.cuda.is_available()
+    device = th.device("cuda:0" if cuda else "cpu")
+    if cuda:
+        th.cuda.manual_seed_all(args.seed)
+        th.backends.cudnn.benchmark = False
+
     venv = VecMonitor(venv)
     venv = VecPyTorch(venv, device=device)
     obs = venv.reset()
