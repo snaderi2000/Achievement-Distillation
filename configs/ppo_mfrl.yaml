@@ -10,7 +10,7 @@ model_cls: PPOMFRLModel
 model_kwargs:
   hidsize: 8192
   rnn_hidsize: 256
-  head_hidsize: 2048
+  head_hidsize: 1536
   nres_blocks: 2
   impala_kwargs:
     chans: [64, 64, 128]
