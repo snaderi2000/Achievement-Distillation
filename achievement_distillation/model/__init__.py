@@ -7,4 +7,5 @@ from .ppo_gru import PPOGRUModel
 from .ppo_impoola import PPOImpoolaModel
 from .ppo_impala_slots import PPOImpalaSlotsModel
 from .ppo_impala_dino_hybrid import PPOImpalaDinoHybridModel
+from .ppo_mfrl import PPOMFRLModel
 from .ppo_value_tower import PPOValueTowerModel
