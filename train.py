@@ -132,6 +132,7 @@ def main(args):
             model,
             storage,
             progress_bonus_beta=config.get("progress_bonus_beta", 0.0),
+            death_penalty=config.get("death_penalty", 0.0),
         )
 
         # Compute returns

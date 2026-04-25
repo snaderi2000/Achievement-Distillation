@@ -11,6 +11,7 @@ def sample_rollouts(
     model: BaseModel,
     storage: RolloutStorage,
     progress_bonus_beta: float = 0.0,
+    death_penalty: float = 0.0,
 ) -> Dict[str, np.ndarray]:
     # Set model to eval model
     model.eval()
@@ -59,12 +60,18 @@ def sample_rollouts(
                 storage.progress_bonus_counts[progress_counts].unsqueeze(-1)
             )
 
+        death_rewards = th.zeros_like(rewards)
+        if death_penalty != 0.0 and "health" in infos:
+            died = (dones > 0.5) & (infos["health"] <= 0)
+            if died.any():
+                death_rewards = died.float().unsqueeze(-1) * death_penalty
+
         outputs["obs"] = obs
-        outputs["rewards"] = rewards + intrinsic_rewards
+        outputs["rewards"] = rewards + intrinsic_rewards + death_rewards
         outputs["masks"] = 1.0 - dones
         outputs["successes"] = infos["successes"]
         outputs["episode_lengths"] = infos["episode_lengths"]
-        intrinsic_reward_sums.append(intrinsic_rewards.mean().item())
+        intrinsic_reward_sums.append((intrinsic_rewards + death_rewards).mean().item())
 
 
         # Update storage
