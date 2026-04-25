@@ -24,7 +24,7 @@ model_kwargs:
 algorithm_cls: PPOAlgorithm
 algorithm_kwargs:
   ppo_nepoch: 3
-  ppo_nbatch: 8
+  ppo_nbatch: 2
   clip_param: 0.2
   vf_loss_coef: 0.5
   ent_coef: 0.01
