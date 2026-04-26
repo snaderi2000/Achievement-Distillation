@@ -22,6 +22,7 @@ class PPOGRUStrongModel(BaseModel):
         hidsize: int,
         rnn_hidsize: int = 256,
         head_hidsize: int = 1024,
+        vf_head_hidsize: int | None = None,
         impala_kwargs: Dict = {},
         dense_init_norm_kwargs: Dict = {},
         action_head_kwargs: Dict = {},
@@ -54,6 +55,7 @@ class PPOGRUStrongModel(BaseModel):
         self.gru = nn.GRUCell(rnn_hidsize, rnn_hidsize)
 
         head_insize = hidsize + rnn_hidsize
+        vf_head_hidsize = head_hidsize if vf_head_hidsize is None else vf_head_hidsize
         self.pi_backbone = nn.Sequential(
             nn.LayerNorm(head_insize),
             nn.Linear(head_insize, head_hidsize),
@@ -61,7 +63,7 @@ class PPOGRUStrongModel(BaseModel):
         )
         self.vf_backbone = nn.Sequential(
             nn.LayerNorm(head_insize),
-            nn.Linear(head_insize, head_hidsize),
+            nn.Linear(head_insize, vf_head_hidsize),
             nn.ReLU(),
         )
 
@@ -72,7 +74,7 @@ class PPOGRUStrongModel(BaseModel):
             **action_head_kwargs,
         )
         self.vf_head = ScaledMSEHead(
-            insize=head_hidsize,
+            insize=vf_head_hidsize,
             outsize=1,
             **mse_head_kwargs,
         )
