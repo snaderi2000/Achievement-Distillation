@@ -27,6 +27,8 @@ class PPOAlgorithm(BaseAlgorithm):
         health_event_horizon: int = 0,
         health_decrease_loss_coef: float = 0.0,
         health_increase_loss_coef: float = 0.0,
+        death_event_horizon: int = 0,
+        death_event_loss_coef: float = 0.0,
         rank_loss_coef: float = 0.0,
         rank_margin: float = 0.05,
         rank_delta: float = 0.1,
@@ -52,6 +54,8 @@ class PPOAlgorithm(BaseAlgorithm):
         self.health_event_horizon = health_event_horizon
         self.health_decrease_loss_coef = health_decrease_loss_coef
         self.health_increase_loss_coef = health_increase_loss_coef
+        self.death_event_horizon = death_event_horizon
+        self.death_event_loss_coef = death_event_loss_coef
         self.rank_loss_coef = rank_loss_coef
         self.rank_margin = rank_margin
         self.rank_delta = rank_delta
@@ -93,6 +97,7 @@ class PPOAlgorithm(BaseAlgorithm):
         short_reward_loss_epoch = 0
         health_decrease_loss_epoch = 0
         health_increase_loss_epoch = 0
+        death_event_loss_epoch = 0
         rank_loss_epoch = 0
         nupdate = 0
 
@@ -102,6 +107,7 @@ class PPOAlgorithm(BaseAlgorithm):
                 self.ppo_nbatch,
                 short_reward_horizon=self.short_reward_horizon,
                 health_event_horizon=self.health_event_horizon,
+                death_event_horizon=self.death_event_horizon,
                 num_phase_bins=self.rank_num_phase_bins,
                 num_progress_bins=self.rank_num_progress_bins,
             )
@@ -133,6 +139,9 @@ class PPOAlgorithm(BaseAlgorithm):
                     health_increase_loss = losses.get("health_increase_loss")
                     if health_increase_loss is None:
                         health_increase_loss = pi_loss.new_zeros(())
+                    death_event_loss = losses.get("death_event_loss")
+                    if death_event_loss is None:
+                        death_event_loss = pi_loss.new_zeros(())
                     rank_loss = losses.get("rank_loss")
                     if rank_loss is None:
                         rank_loss = pi_loss.new_zeros(())
@@ -143,6 +152,7 @@ class PPOAlgorithm(BaseAlgorithm):
                         + self.short_reward_loss_coef * short_reward_loss
                         + self.health_decrease_loss_coef * health_decrease_loss
                         + self.health_increase_loss_coef * health_increase_loss
+                        + self.death_event_loss_coef * death_event_loss
                         + self.rank_loss_coef * rank_loss
                         - self.ent_coef * entropy
                     )
@@ -166,6 +176,7 @@ class PPOAlgorithm(BaseAlgorithm):
                 short_reward_loss_epoch += short_reward_loss.item()
                 health_decrease_loss_epoch += health_decrease_loss.item()
                 health_increase_loss_epoch += health_increase_loss.item()
+                death_event_loss_epoch += death_event_loss.item()
                 rank_loss_epoch += rank_loss.item()
                 nupdate += 1
 
@@ -177,6 +188,7 @@ class PPOAlgorithm(BaseAlgorithm):
         short_reward_loss_epoch /= nupdate
         health_decrease_loss_epoch /= nupdate
         health_increase_loss_epoch /= nupdate
+        death_event_loss_epoch /= nupdate
         rank_loss_epoch /= nupdate
 
         # Define train stats
@@ -193,6 +205,8 @@ class PPOAlgorithm(BaseAlgorithm):
             train_stats["health_decrease_loss"] = health_decrease_loss_epoch
         if self.health_increase_loss_coef > 0:
             train_stats["health_increase_loss"] = health_increase_loss_epoch
+        if self.death_event_loss_coef > 0:
+            train_stats["death_event_loss"] = death_event_loss_epoch
         if self.rank_loss_coef > 0:
             train_stats["rank_loss"] = rank_loss_epoch
 

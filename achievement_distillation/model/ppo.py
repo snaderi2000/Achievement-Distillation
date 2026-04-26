@@ -25,6 +25,9 @@ class PPOModel(BaseModel):
         use_phase_vf_head: bool = False,
         use_short_reward_head: bool = False,
         use_health_event_heads: bool = False,
+        use_death_event_head: bool = False,
+        aux_head_hidsize: int = 0,
+        value_hidsize: int = 0,
     ):
         super().__init__(observation_space, action_space)
 
@@ -51,8 +54,18 @@ class PPOModel(BaseModel):
             num_actions=num_actions,
             **action_head_kwargs,
         )
+        self.vf_tower = None
+        vf_insize = hidsize
+        if value_hidsize > 0:
+            self.vf_tower = FanInInitReLULayer(
+                hidsize,
+                value_hidsize,
+                layer_type="linear",
+                **dense_init_norm_kwargs,
+            )
+            vf_insize = value_hidsize
         self.vf_head = ScaledMSEHead(
-            insize=hidsize,
+            insize=vf_insize,
             outsize=1,
             **mse_head_kwargs,
         )
@@ -75,15 +88,42 @@ class PPOModel(BaseModel):
                 outsize=1,
             )
         self.use_health_event_heads = use_health_event_heads
+        self.use_death_event_head = use_death_event_head
+        self.aux_head_hidsize = aux_head_hidsize
         if use_health_event_heads:
-            self.health_decrease_head = PlainMSEHead(
-                insize=hidsize,
-                outsize=1,
-            )
-            self.health_increase_head = PlainMSEHead(
-                insize=hidsize,
-                outsize=1,
-            )
+            if aux_head_hidsize > 0:
+                self.health_decrease_mlp = FanInInitReLULayer(
+                    hidsize,
+                    aux_head_hidsize,
+                    layer_type="linear",
+                    **dense_init_norm_kwargs,
+                )
+                self.health_increase_mlp = FanInInitReLULayer(
+                    hidsize,
+                    aux_head_hidsize,
+                    layer_type="linear",
+                    **dense_init_norm_kwargs,
+                )
+                aux_insize = aux_head_hidsize
+            else:
+                self.health_decrease_mlp = None
+                self.health_increase_mlp = None
+                aux_insize = hidsize
+            self.health_decrease_head = PlainMSEHead(insize=aux_insize, outsize=1)
+            self.health_increase_head = PlainMSEHead(insize=aux_insize, outsize=1)
+        if use_death_event_head:
+            if aux_head_hidsize > 0:
+                self.death_event_mlp = FanInInitReLULayer(
+                    hidsize,
+                    aux_head_hidsize,
+                    layer_type="linear",
+                    **dense_init_norm_kwargs,
+                )
+                death_insize = aux_head_hidsize
+            else:
+                self.death_event_mlp = None
+                death_insize = hidsize
+            self.death_event_head = PlainMSEHead(insize=death_insize, outsize=1)
 
     @th.no_grad()
     def act(self, obs: th.Tensor, **kwargs) -> Dict[str, th.Tensor]:
@@ -114,7 +154,8 @@ class PPOModel(BaseModel):
         latents = self.encode(obs)
 
         # Pass through heads
-        pi_latents = vf_latents = latents
+        pi_latents = latents
+        vf_latents = self.vf_tower(latents) if self.vf_tower is not None else latents
         pi_logits = self.pi_head(pi_latents)
         vpreds = self.vf_head(vf_latents)
         phase_vpreds = self.phase_vf_head(vf_latents) if self.use_phase_vf_head else None
@@ -123,12 +164,22 @@ class PPOModel(BaseModel):
             if self.use_short_reward_head
             else None
         )
-        health_decrease_logits = (
-            self.health_decrease_head(latents) if self.use_health_event_heads else None
-        )
-        health_increase_logits = (
-            self.health_increase_head(latents) if self.use_health_event_heads else None
-        )
+        if self.use_health_event_heads:
+            health_decrease_feats = (
+                self.health_decrease_mlp(latents) if self.health_decrease_mlp is not None else latents
+            )
+            health_increase_feats = (
+                self.health_increase_mlp(latents) if self.health_increase_mlp is not None else latents
+            )
+            health_decrease_logits = self.health_decrease_head(health_decrease_feats)
+            health_increase_logits = self.health_increase_head(health_increase_feats)
+        else:
+            health_decrease_logits = None
+            health_increase_logits = None
+        death_event_logits = None
+        if self.use_death_event_head:
+            death_feats = self.death_event_mlp(latents) if self.death_event_mlp is not None else latents
+            death_event_logits = self.death_event_head(death_feats)
 
         # Define outputs
         outputs = {
@@ -146,6 +197,8 @@ class PPOModel(BaseModel):
             outputs["health_decrease_logits"] = health_decrease_logits
         if health_increase_logits is not None:
             outputs["health_increase_logits"] = health_increase_logits
+        if death_event_logits is not None:
+            outputs["death_event_logits"] = death_event_logits
 
         return outputs
 
@@ -172,6 +225,8 @@ class PPOModel(BaseModel):
         health_decrease_targets: th.Tensor | None = None,
         health_increase_targets: th.Tensor | None = None,
         health_event_mask: th.Tensor | None = None,
+        death_targets: th.Tensor | None = None,
+        death_event_mask: th.Tensor | None = None,
         rank_margin: float = 0.05,
         rank_delta: float = 0.1,
         rank_max_pairs_per_group: int = 8,
@@ -256,6 +311,17 @@ class PPOModel(BaseModel):
                     )
             losses["health_decrease_loss"] = health_decrease_loss
             losses["health_increase_loss"] = health_increase_loss
+        if self.use_death_event_head:
+            death_event_loss = th.zeros((), device=vtargs.device)
+            if death_targets is not None and death_event_mask is not None:
+                valid_mask = death_event_mask.bool()
+                if valid_mask.any():
+                    death_event_logits = outputs["death_event_logits"][valid_mask]
+                    death_event_loss = F.binary_cross_entropy_with_logits(
+                        death_event_logits,
+                        death_targets[valid_mask],
+                    )
+            losses["death_event_loss"] = death_event_loss
 
         return losses
 

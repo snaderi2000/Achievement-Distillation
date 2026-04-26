@@ -244,6 +244,35 @@ class RolloutStorage:
 
         return decrease_targets, increase_targets, event_mask
 
+    def get_death_event_targets(self, horizon: int):
+        death_targets = th.zeros((self.nstep, self.nproc, 1), device=self.device)
+        death_mask = th.zeros((self.nstep, self.nproc, 1), device=self.device).bool()
+
+        if horizon <= 0:
+            return death_targets, death_mask
+
+        for env_idx in range(self.nproc):
+            next_masks = self.masks[1:, env_idx, 0]
+            next_health = self.vitals[1:, env_idx, 3]
+            for step in range(self.nstep):
+                terminated = False
+                death = False
+                for offset in range(horizon):
+                    future_step = step + offset
+                    if future_step >= self.nstep:
+                        break
+                    if next_masks[future_step] == 0:
+                        terminated = True
+                        if next_health[future_step] <= 0:
+                            death = True
+                        break
+
+                if step + horizon <= self.nstep or terminated:
+                    death_targets[step, env_idx, 0] = float(death)
+                    death_mask[step, env_idx, 0] = True
+
+        return death_targets, death_mask
+
     def compute_returns(self, gamma: float, gae_lambda: float):
         # Compute returns
         gae = 0
@@ -265,6 +294,7 @@ class RolloutStorage:
         nbatch: int,
         short_reward_horizon: int = 0,
         health_event_horizon: int = 0,
+        death_event_horizon: int = 0,
         num_phase_bins: int = 4,
         num_progress_bins: int = 4,
     ) -> Iterator[Dict[str, th.Tensor]]:
@@ -294,6 +324,9 @@ class RolloutStorage:
         health_decrease_targets = health_decrease_targets.view(-1, 1)
         health_increase_targets = health_increase_targets.view(-1, 1)
         health_event_mask = health_event_mask.view(-1, 1)
+        death_targets, death_event_mask = self.get_death_event_targets(death_event_horizon)
+        death_targets = death_targets.view(-1, 1)
+        death_event_mask = death_event_mask.view(-1, 1)
 
         for indices in sampler:
             batch = {
@@ -312,6 +345,8 @@ class RolloutStorage:
                 "health_decrease_targets": health_decrease_targets[indices],
                 "health_increase_targets": health_increase_targets[indices],
                 "health_event_mask": health_event_mask[indices],
+                "death_targets": death_targets[indices],
+                "death_event_mask": death_event_mask[indices],
             }
             yield batch
 
