@@ -327,6 +327,7 @@ class RolloutStorage:
         death_targets, death_event_mask = self.get_death_event_targets(death_event_horizon)
         death_targets = death_targets.view(-1, 1)
         death_event_mask = death_event_mask.view(-1, 1)
+        health_values = self.vitals[:-1, :, 3].contiguous().view(-1, 1)
 
         for indices in sampler:
             batch = {
@@ -347,6 +348,7 @@ class RolloutStorage:
                 "health_event_mask": health_event_mask[indices],
                 "death_targets": death_targets[indices],
                 "death_event_mask": death_event_mask[indices],
+                "health_values": health_values[indices],
             }
             yield batch
 

@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from gym import spaces
 
 from achievement_distillation.model.base import BaseModel
+from achievement_distillation.health_counterfactual import apply_health_counterfactual, get_health_templates
 from achievement_distillation.impala_cnn import ImpalaCNN
 from achievement_distillation.action_head import CategoricalActionHead
 from achievement_distillation.mse_head import PlainMSEHead, ScaledMSEHead
@@ -29,6 +30,8 @@ class PPOModel(BaseModel):
         aux_head_hidsize: int = 0,
         value_hidsize: int = 0,
         aux_on_value_features: bool = False,
+        use_health_cf_rank: bool = False,
+        health_cf_target: int = 2,
     ):
         super().__init__(observation_space, action_space)
 
@@ -47,6 +50,8 @@ class PPOModel(BaseModel):
             **dense_init_norm_kwargs,
         )
         self.hidsize = hidsize
+        self.use_health_cf_rank = use_health_cf_rank
+        self.health_cf_target = int(health_cf_target)
 
         # Heads
         num_actions = getattr(self.action_space, "n")
@@ -231,10 +236,12 @@ class PPOModel(BaseModel):
         health_event_mask: th.Tensor | None = None,
         death_targets: th.Tensor | None = None,
         death_event_mask: th.Tensor | None = None,
+        health_values: th.Tensor | None = None,
         rank_margin: float = 0.05,
         rank_delta: float = 0.1,
         rank_max_pairs_per_group: int = 8,
         rank_num_progress_bins: int = 4,
+        health_cf_margin: float = 0.1,
         **kwargs,
     ) -> Dict[str, th.Tensor]:
         # Pass through model
@@ -326,6 +333,25 @@ class PPOModel(BaseModel):
                         death_targets[valid_mask],
                     )
             losses["death_event_loss"] = death_event_loss
+        if self.use_health_cf_rank:
+            health_cf_loss = th.zeros((), device=vtargs.device)
+            if health_values is not None:
+                target = health_values.new_full(health_values.shape, self.health_cf_target)
+                valid_mask = (health_values > self.health_cf_target).squeeze(-1)
+                if valid_mask.any():
+                    obs_cf = apply_health_counterfactual(
+                        obs=obs[valid_mask],
+                        target_health=target[valid_mask].squeeze(-1),
+                        templates=get_health_templates(
+                            size_hw=(obs.shape[-2], obs.shape[-1]),
+                            device=obs.device,
+                        ),
+                    )
+                    cf_outputs = self.forward(obs_cf, **kwargs)
+                    base_values = self.vf_head.denormalize(vpreds[valid_mask]).squeeze(-1)
+                    cf_values = self.vf_head.denormalize(cf_outputs["vpreds"]).squeeze(-1)
+                    health_cf_loss = th.relu(health_cf_margin - (base_values - cf_values)).mean()
+            losses["health_cf_loss"] = health_cf_loss
 
         return losses
 
