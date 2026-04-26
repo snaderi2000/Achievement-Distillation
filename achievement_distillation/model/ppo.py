@@ -28,6 +28,7 @@ class PPOModel(BaseModel):
         use_death_event_head: bool = False,
         aux_head_hidsize: int = 0,
         value_hidsize: int = 0,
+        aux_on_value_features: bool = False,
     ):
         super().__init__(observation_space, action_space)
 
@@ -90,16 +91,18 @@ class PPOModel(BaseModel):
         self.use_health_event_heads = use_health_event_heads
         self.use_death_event_head = use_death_event_head
         self.aux_head_hidsize = aux_head_hidsize
+        self.aux_on_value_features = aux_on_value_features
+        aux_source_insize = vf_insize if aux_on_value_features else hidsize
         if use_health_event_heads:
             if aux_head_hidsize > 0:
                 self.health_decrease_mlp = FanInInitReLULayer(
-                    hidsize,
+                    aux_source_insize,
                     aux_head_hidsize,
                     layer_type="linear",
                     **dense_init_norm_kwargs,
                 )
                 self.health_increase_mlp = FanInInitReLULayer(
-                    hidsize,
+                    aux_source_insize,
                     aux_head_hidsize,
                     layer_type="linear",
                     **dense_init_norm_kwargs,
@@ -108,13 +111,13 @@ class PPOModel(BaseModel):
             else:
                 self.health_decrease_mlp = None
                 self.health_increase_mlp = None
-                aux_insize = hidsize
+                aux_insize = aux_source_insize
             self.health_decrease_head = PlainMSEHead(insize=aux_insize, outsize=1)
             self.health_increase_head = PlainMSEHead(insize=aux_insize, outsize=1)
         if use_death_event_head:
             if aux_head_hidsize > 0:
                 self.death_event_mlp = FanInInitReLULayer(
-                    hidsize,
+                    aux_source_insize,
                     aux_head_hidsize,
                     layer_type="linear",
                     **dense_init_norm_kwargs,
@@ -122,7 +125,7 @@ class PPOModel(BaseModel):
                 death_insize = aux_head_hidsize
             else:
                 self.death_event_mlp = None
-                death_insize = hidsize
+                death_insize = aux_source_insize
             self.death_event_head = PlainMSEHead(insize=death_insize, outsize=1)
 
     @th.no_grad()
@@ -164,12 +167,13 @@ class PPOModel(BaseModel):
             if self.use_short_reward_head
             else None
         )
+        aux_source = vf_latents if self.aux_on_value_features else latents
         if self.use_health_event_heads:
             health_decrease_feats = (
-                self.health_decrease_mlp(latents) if self.health_decrease_mlp is not None else latents
+                self.health_decrease_mlp(aux_source) if self.health_decrease_mlp is not None else aux_source
             )
             health_increase_feats = (
-                self.health_increase_mlp(latents) if self.health_increase_mlp is not None else latents
+                self.health_increase_mlp(aux_source) if self.health_increase_mlp is not None else aux_source
             )
             health_decrease_logits = self.health_decrease_head(health_decrease_feats)
             health_increase_logits = self.health_increase_head(health_increase_feats)
@@ -178,7 +182,7 @@ class PPOModel(BaseModel):
             health_increase_logits = None
         death_event_logits = None
         if self.use_death_event_head:
-            death_feats = self.death_event_mlp(latents) if self.death_event_mlp is not None else latents
+            death_feats = self.death_event_mlp(aux_source) if self.death_event_mlp is not None else aux_source
             death_event_logits = self.death_event_head(death_feats)
 
         # Define outputs
