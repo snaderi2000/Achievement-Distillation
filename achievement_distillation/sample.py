@@ -62,7 +62,8 @@ def sample_rollouts(
 
         death_rewards = th.zeros_like(rewards)
         if death_penalty != 0.0 and "health" in infos:
-            died = (dones > 0.5) & (infos["health"] <= 0)
+            done_flags = (dones > 0.5).squeeze(-1)
+            died = done_flags & (infos["health"] <= 0)
             if died.any():
                 death_rewards = died.float().unsqueeze(-1) * death_penalty
 
