@@ -90,15 +90,42 @@ def train_multiclass_probe(
     )
     test_loader = DataLoader(TensorDataset(x_test, y_test), batch_size=max(batch_size, 256))
 
-    for _ in range(epochs):
+    for epoch in range(epochs):
         model.train()
+        train_loss_total = 0.0
+        train_batches = 0
         for xb, yb in train_loader:
             xb = xb.to(device)
             yb = yb.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(xb), yb)
+            logits = model(xb)
+            loss = criterion(logits, yb)
             loss.backward()
             optimizer.step()
+            train_loss_total += float(loss.item())
+            train_batches += 1
+
+        if (epoch + 1) % 10 == 0 or epoch == 0 or epoch + 1 == epochs:
+            model.eval()
+            eval_preds: List[int] = []
+            eval_labels: List[int] = []
+            eval_loss_total = 0.0
+            eval_batches = 0
+            with th.no_grad():
+                for xb, yb in test_loader:
+                    logits = model(xb.to(device))
+                    loss = criterion(logits, yb.to(device))
+                    eval_loss_total += float(loss.item())
+                    eval_batches += 1
+                    eval_preds.extend(logits.argmax(dim=1).cpu().tolist())
+                    eval_labels.extend(yb.tolist())
+            print(
+                f"[probe-{probe_type}-multiclass] "
+                f"epoch={epoch + 1}/{epochs} "
+                f"train_loss={train_loss_total / max(train_batches, 1):.4f} "
+                f"test_loss={eval_loss_total / max(eval_batches, 1):.4f} "
+                f"test_acc={accuracy_score(eval_labels, eval_preds):.4f}"
+            )
 
     model.eval()
     preds: List[int] = []
@@ -152,15 +179,43 @@ def train_binary_probe(
         batch_size=max(batch_size, 256),
     )
 
-    for _ in range(epochs):
+    for epoch in range(epochs):
         model.train()
+        train_loss_total = 0.0
+        train_batches = 0
         for xb, yb in train_loader:
             xb = xb.to(device)
             yb = yb.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(xb), yb)
+            logits = model(xb)
+            loss = criterion(logits, yb)
             loss.backward()
             optimizer.step()
+            train_loss_total += float(loss.item())
+            train_batches += 1
+
+        if (epoch + 1) % 10 == 0 or epoch == 0 or epoch + 1 == epochs:
+            model.eval()
+            eval_preds: List[int] = []
+            eval_labels: List[int] = []
+            eval_loss_total = 0.0
+            eval_batches = 0
+            with th.no_grad():
+                for xb, yb in test_loader:
+                    logits = model(xb.to(device))
+                    loss = criterion(logits, yb.to(device))
+                    eval_loss_total += float(loss.item())
+                    eval_batches += 1
+                    pred = (th.sigmoid(logits) >= 0.5).long().cpu().view(-1)
+                    eval_preds.extend(pred.tolist())
+                    eval_labels.extend(yb.long().view(-1).tolist())
+            print(
+                f"[probe-{probe_type}-binary] "
+                f"epoch={epoch + 1}/{epochs} "
+                f"train_loss={train_loss_total / max(train_batches, 1):.4f} "
+                f"test_loss={eval_loss_total / max(eval_batches, 1):.4f} "
+                f"test_acc={accuracy_score(eval_labels, eval_preds):.4f}"
+            )
 
     model.eval()
     preds: List[int] = []
