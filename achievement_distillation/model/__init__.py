@@ -5,6 +5,7 @@ from .ppo_baseline import PPOModelBaseline
 from .ppo_dino import PPODinoModel
 from .ppo_gru import PPOGRUModel
 from .ppo_gru_strong import PPOGRUStrongModel
+from .ppo_lstm_strong import PPOLSTMStrongModel
 from .ppo_impoola import PPOImpoolaModel
 from .ppo_impala_slots import PPOImpalaSlotsModel
 from .ppo_impala_dino_hybrid import PPOImpalaDinoHybridModel
