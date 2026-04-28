@@ -232,9 +232,20 @@ def save_value_graph_viewer(
     dones = dataset["dones"][selected_idx].cpu().numpy()
     episode_ids = dataset["episode_ids"][selected_idx].cpu().numpy()
     step_ids = dataset["step_ids"][selected_idx].cpu().numpy()
+    action_probs = dataset["action_probs"][selected_idx].cpu().numpy() if "action_probs" in dataset else None
+    memory_latents = dataset["memory_latents"][selected_idx] if "memory_latents" in dataset else None
+    pi_latents = dataset["pi_latents"][selected_idx] if "pi_latents" in dataset else None
+    vf_latents = dataset["vf_latents"][selected_idx] if "vf_latents" in dataset else None
+    states = dataset["states"][selected_idx] if "states" in dataset else None
+    vitals = dataset["vitals"][selected_idx].cpu().numpy() if "vitals" in dataset else None
     rnn_state_norms = None
     if "rnn_states" in dataset:
         rnn_state_norms = dataset["rnn_states"][selected_idx].norm(dim=-1).cpu().numpy()
+    memory_norms = memory_latents.norm(dim=-1).cpu().numpy() if memory_latents is not None else None
+    pi_norms = pi_latents.norm(dim=-1).cpu().numpy() if pi_latents is not None else None
+    vf_norms = vf_latents.norm(dim=-1).cpu().numpy() if vf_latents is not None else None
+    state_norms = states.norm(dim=-1).cpu().numpy() if states is not None else None
+    latent_norms = dataset["latents"][selected_idx].norm(dim=-1).cpu().numpy()
 
     coords = compute_value_ring_layout(values, step_ids, episode_ids)
     temporal_edges = build_temporal_edges(episode_ids, step_ids)
@@ -271,13 +282,25 @@ def save_value_graph_viewer(
                 "episode_id": int(episode_ids[idx]),
                 "step_id": int(step_ids[idx]),
                 "action_name": ACTION_NAMES[int(actions[idx])] if 0 <= int(actions[idx]) < len(ACTION_NAMES) else f"action_{int(actions[idx])}",
+                "action_probs": None if action_probs is None else action_probs[idx].tolist(),
                 "image_bytes": image_bytes,
                 "image_width": int(width),
                 "image_height": int(height),
                 "achieved_tasks": achieved,
                 "new_achievements": full_first_unlocks[int(selected_idx[idx])],
                 "achievement_counts": achievements[idx].tolist(),
+                "latent_norm": float(latent_norms[idx]),
+                "state_norm": None if state_norms is None else float(state_norms[idx]),
                 "rnn_state_norm": None if rnn_state_norms is None else float(rnn_state_norms[idx]),
+                "memory_norm": None if memory_norms is None else float(memory_norms[idx]),
+                "pi_norm": None if pi_norms is None else float(pi_norms[idx]),
+                "vf_norm": None if vf_norms is None else float(vf_norms[idx]),
+                "vitals": None if vitals is None else {
+                    "food": int(vitals[idx][0]),
+                    "drink": int(vitals[idx][1]),
+                    "energy": int(vitals[idx][2]),
+                    "health": float(vitals[idx][3]),
+                },
             }
         )
 
@@ -464,6 +487,45 @@ def save_value_graph_viewer(
       color: #3e4e40;
       min-height: 20px;
     }}
+    .kv-grid {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 10px;
+      font-size: 13px;
+      color: #3e4e40;
+    }}
+    .kv-grid strong {{
+      display: block;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--moss);
+      margin-bottom: 4px;
+    }}
+    .action-bars {{
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 12px;
+      color: #304033;
+    }}
+    .action-bar-row {{
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr) 46px;
+      gap: 8px;
+      align-items: center;
+    }}
+    .action-bar-track {{
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(102, 128, 106, 0.16);
+      overflow: hidden;
+    }}
+    .action-bar-fill {{
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #66806a, #ca7f45);
+    }}
     .legend {{
       display: flex;
       flex-direction: column;
@@ -555,6 +617,36 @@ def save_value_graph_viewer(
           <div id="node-tasks" class="task-list">Hover a node to inspect its state.</div>
         </div>
       </section>
+      <section class="card">
+        <div>
+          <strong style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#66806a;margin-bottom:8px;">Model State</strong>
+          <div class="kv-grid">
+            <div><strong>Latent Norm</strong><span id="node-latent-norm">-</span></div>
+            <div><strong>State Norm</strong><span id="node-state-norm">-</span></div>
+            <div><strong>Input RNN Norm</strong><span id="node-rnn-input-norm">-</span></div>
+            <div><strong>Updated RNN Norm</strong><span id="node-memory-norm">-</span></div>
+            <div><strong>Policy Feat Norm</strong><span id="node-pi-norm">-</span></div>
+            <div><strong>Value Feat Norm</strong><span id="node-vf-norm">-</span></div>
+          </div>
+        </div>
+      </section>
+      <section class="card">
+        <div>
+          <strong style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#66806a;margin-bottom:8px;">Vitals</strong>
+          <div class="kv-grid">
+            <div><strong>Food</strong><span id="node-food">-</span></div>
+            <div><strong>Drink</strong><span id="node-drink">-</span></div>
+            <div><strong>Energy</strong><span id="node-energy">-</span></div>
+            <div><strong>Health</strong><span id="node-health">-</span></div>
+          </div>
+        </div>
+      </section>
+      <section class="card">
+        <div>
+          <strong style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#66806a;margin-bottom:8px;">Action Distribution</strong>
+          <div id="node-action-bars" class="action-bars">Hover a node to inspect its action probabilities.</div>
+        </div>
+      </section>
       <section class="card legend">
         <div class="legend-row"><span class="swatch" style="background:#768b78;"></span><span>Temporal rollout edges</span></div>
         <div class="legend-row"><span class="swatch" style="background:#ca7f45;"></span><span>Value-neighbor edges</span></div>
@@ -588,8 +680,19 @@ def save_value_graph_viewer(
     const nodeAction = document.getElementById("node-action");
     const nodeDone = document.getElementById("node-done");
     const nodeRnnNorm = document.getElementById("node-rnn-norm");
+    const nodeRnnInputNorm = document.getElementById("node-rnn-input-norm");
     const nodeNewTasks = document.getElementById("node-new-tasks");
     const nodeTasks = document.getElementById("node-tasks");
+    const nodeLatentNorm = document.getElementById("node-latent-norm");
+    const nodeStateNorm = document.getElementById("node-state-norm");
+    const nodeMemoryNorm = document.getElementById("node-memory-norm");
+    const nodePiNorm = document.getElementById("node-pi-norm");
+    const nodeVfNorm = document.getElementById("node-vf-norm");
+    const nodeFood = document.getElementById("node-food");
+    const nodeDrink = document.getElementById("node-drink");
+    const nodeEnergy = document.getElementById("node-energy");
+    const nodeHealth = document.getElementById("node-health");
+    const nodeActionBars = document.getElementById("node-action-bars");
     const rewardRingToggle = document.getElementById("reward-ring-toggle");
     const actionFilterSelect = document.getElementById("action-filter-select");
     const stepRangeInput = document.getElementById("step-range-input");
@@ -849,6 +952,35 @@ def save_value_graph_viewer(
       return bytes;
     }}
 
+    function formatMaybeNumber(value, digits = 3) {{
+      if (value === null || value === undefined) {{
+        return "-";
+      }}
+      return Number(value).toFixed(digits);
+    }}
+
+    function renderActionBars(node) {{
+      if (!node || !node.action_probs) {{
+        nodeActionBars.textContent = "Hover a node to inspect its action probabilities.";
+        return;
+      }}
+      const top = node.action_probs
+        .map((prob, idx) => [prob, idx])
+        .sort((a, b) => b[0] - a[0])
+        .slice(0, 5);
+      nodeActionBars.innerHTML = top.map(([prob, idx]) => {{
+        const pct = Math.max(0, Math.min(100, prob * 100));
+        const label = DATA.meta.action_names[idx] || `action_${{idx}}`;
+        return `
+          <div class="action-bar-row">
+            <span>${{label}}</span>
+            <div class="action-bar-track"><div class="action-bar-fill" style="width:${{pct}}%"></div></div>
+            <span>${{pct.toFixed(1)}}%</span>
+          </div>
+        `;
+      }}).join("");
+    }}
+
     function renderPreview(node) {{
       previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
       previewCtx.fillStyle = "#efe6d5";
@@ -867,8 +999,19 @@ def save_value_graph_viewer(
         nodeAction.textContent = "-";
         nodeDone.textContent = "-";
         nodeRnnNorm.textContent = "-";
+        nodeRnnInputNorm.textContent = "-";
+        nodeLatentNorm.textContent = "-";
+        nodeStateNorm.textContent = "-";
+        nodeMemoryNorm.textContent = "-";
+        nodePiNorm.textContent = "-";
+        nodeVfNorm.textContent = "-";
+        nodeFood.textContent = "-";
+        nodeDrink.textContent = "-";
+        nodeEnergy.textContent = "-";
+        nodeHealth.textContent = "-";
         nodeNewTasks.textContent = "No new achievements at this step.";
         nodeTasks.textContent = "Hover a node to inspect its state.";
+        renderActionBars(null);
         return;
       }}
 
@@ -895,8 +1038,19 @@ def save_value_graph_viewer(
       nodeAction.textContent = node.action_name;
       nodeDone.textContent = node.done ? "yes" : "no";
       nodeRnnNorm.textContent = node.rnn_state_norm === null ? "-" : node.rnn_state_norm.toFixed(3);
+      nodeRnnInputNorm.textContent = node.rnn_state_norm === null ? "-" : node.rnn_state_norm.toFixed(3);
+      nodeLatentNorm.textContent = formatMaybeNumber(node.latent_norm);
+      nodeStateNorm.textContent = formatMaybeNumber(node.state_norm);
+      nodeMemoryNorm.textContent = formatMaybeNumber(node.memory_norm);
+      nodePiNorm.textContent = formatMaybeNumber(node.pi_norm);
+      nodeVfNorm.textContent = formatMaybeNumber(node.vf_norm);
+      nodeFood.textContent = node.vitals ? String(node.vitals.food) : "-";
+      nodeDrink.textContent = node.vitals ? String(node.vitals.drink) : "-";
+      nodeEnergy.textContent = node.vitals ? String(node.vitals.energy) : "-";
+      nodeHealth.textContent = node.vitals ? formatMaybeNumber(node.vitals.health, 1) : "-";
       nodeNewTasks.textContent = node.new_achievements.length ? node.new_achievements.join(", ") : "No new achievements at this step.";
       nodeTasks.textContent = node.achieved_tasks.length ? node.achieved_tasks.join(", ") : "No achievements unlocked yet.";
+      renderActionBars(node);
     }}
 
     function findNodeAtScreenPoint(x, y) {{
@@ -1083,8 +1237,13 @@ def collect_value_dataset(
     latents: List[th.Tensor] = []
     values: List[th.Tensor] = []
     actions: List[th.Tensor] = []
+    action_probs: List[th.Tensor] = []
+    memory_latents: List[th.Tensor] = []
+    pi_latents: List[th.Tensor] = []
+    vf_latents: List[th.Tensor] = []
     states: List[th.Tensor] = []
     rnn_states: List[th.Tensor] = []
+    vitals: List[th.Tensor] = []
     rewards: List[float] = []
     dones: List[bool] = []
     achievements: List[th.Tensor] = []
@@ -1121,6 +1280,7 @@ def collect_value_dataset(
                 action = outputs["actions"]
                 value = outputs["vpreds"]
                 latent = outputs["latents"]
+                pi_logits = outputs.get("pi_logits")
 
             next_obs, reward, done_tensor, infos = venv.step(action)
 
@@ -1128,10 +1288,19 @@ def collect_value_dataset(
             latents.append(latent.squeeze(0).detach().cpu())
             values.append(value.squeeze(0).detach().cpu())
             actions.append(action.squeeze(0).detach().cpu())
+            if pi_logits is not None:
+                action_probs.append(th.exp(pi_logits.squeeze(0)).detach().cpu())
+            if "memory_latents" in outputs:
+                memory_latents.append(outputs["memory_latents"].squeeze(0).detach().cpu())
+            if "pi_latents" in outputs:
+                pi_latents.append(outputs["pi_latents"].squeeze(0).detach().cpu())
+            if "vf_latents" in outputs:
+                vf_latents.append(outputs["vf_latents"].squeeze(0).detach().cpu())
             if current_states is not None:
                 states.append(current_states.squeeze(0).detach().cpu())
             if current_rnn_states is not None:
                 rnn_states.append(current_rnn_states.squeeze(0).detach().cpu())
+            vitals.append(th.cat([infos["vitals"], infos["health"].unsqueeze(-1)], dim=-1).squeeze(0).detach().cpu())
             rewards.append(float(reward.item()))
             dones.append(bool(done_tensor.item()))
             achievements.append(infos["achievements"].squeeze(0).detach().cpu())
@@ -1187,6 +1356,16 @@ def collect_value_dataset(
         dataset["states"] = th.stack(states)
     if rnn_states:
         dataset["rnn_states"] = th.stack(rnn_states)
+    if action_probs:
+        dataset["action_probs"] = th.stack(action_probs)
+    if memory_latents:
+        dataset["memory_latents"] = th.stack(memory_latents)
+    if pi_latents:
+        dataset["pi_latents"] = th.stack(pi_latents)
+    if vf_latents:
+        dataset["vf_latents"] = th.stack(vf_latents)
+    if vitals:
+        dataset["vitals"] = th.stack(vitals)
     return dataset, latest_video_path
 
 

@@ -147,13 +147,21 @@ def main(args):
         # Compute score
         successes = rollout_stats["successes"]
         total_successes = np.concatenate([total_successes, successes], axis=0)
-        success_rate = 100 * np.mean(total_successes, axis=0)
-        score = np.exp(np.mean(np.log(1 + success_rate))) - 1
+        current_success_rate = 100 * np.mean(successes, axis=0)
+        cumulative_success_rate = 100 * np.mean(total_successes, axis=0)
+        score = np.exp(np.mean(np.log(1 + current_success_rate))) - 1
+        score_cumulative = np.exp(np.mean(np.log(1 + cumulative_success_rate))) - 1
+        reward_mean = float(np.mean(rollout_stats["episode_rewards"])) if len(rollout_stats["episode_rewards"]) else 0.0
+        length_mean = float(np.mean(rollout_stats["episode_lengths"])) if len(rollout_stats["episode_lengths"]) else 0.0
 
         # Get eval stats
         eval_stats = {
-            "success_rate": {k: v for k, v in zip(TASKS, success_rate)},
+            "success_rate": {k: v for k, v in zip(TASKS, current_success_rate)},
+            "success_rate_cumulative": {k: v for k, v in zip(TASKS, cumulative_success_rate)},
             "score": score,
+            "score_cumulative": score_cumulative,
+            "reward_mean": reward_mean,
+            "length_mean": length_mean,
         }
 
         # Print stats

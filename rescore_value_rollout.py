@@ -39,6 +39,8 @@ def rescore_dataset(
     batch_size: int,
 ) -> Dict[str, th.Tensor]:
     observations = dataset["observations"]
+    states = dataset.get("states")
+    rnn_states = dataset.get("rnn_states")
     rescored_values = []
     rescored_latents = []
 
@@ -46,7 +48,12 @@ def rescore_dataset(
     with th.no_grad():
         for start in range(0, len(observations), batch_size):
             batch = observations[start : start + batch_size].to(device)
-            outputs = model.forward(batch)
+            kwargs = {}
+            if states is not None:
+                kwargs["states"] = states[start : start + batch_size].to(device)
+            if rnn_states is not None:
+                kwargs["rnn_states"] = rnn_states[start : start + batch_size].to(device)
+            outputs = model.forward(batch, **kwargs)
             rescored_values.append(model.vf_head.denormalize(outputs["vpreds"]).view(-1).cpu())
             rescored_latents.append(outputs["latents"].cpu())
 
