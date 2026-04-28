@@ -29,6 +29,8 @@ class PPOAlgorithm(BaseAlgorithm):
         health_increase_loss_coef: float = 0.0,
         death_event_horizon: int = 0,
         death_event_loss_coef: float = 0.0,
+        health_vf_loss_coef: float = 0.0,
+        achievement_vf_loss_coef: float = 0.0,
         health_cf_loss_coef: float = 0.0,
         health_cf_margin: float = 0.1,
         rank_loss_coef: float = 0.0,
@@ -58,6 +60,8 @@ class PPOAlgorithm(BaseAlgorithm):
         self.health_increase_loss_coef = health_increase_loss_coef
         self.death_event_horizon = death_event_horizon
         self.death_event_loss_coef = death_event_loss_coef
+        self.health_vf_loss_coef = health_vf_loss_coef
+        self.achievement_vf_loss_coef = achievement_vf_loss_coef
         self.health_cf_loss_coef = health_cf_loss_coef
         self.health_cf_margin = health_cf_margin
         self.rank_loss_coef = rank_loss_coef
@@ -102,6 +106,8 @@ class PPOAlgorithm(BaseAlgorithm):
         health_decrease_loss_epoch = 0
         health_increase_loss_epoch = 0
         death_event_loss_epoch = 0
+        health_vf_loss_epoch = 0
+        achievement_vf_loss_epoch = 0
         health_cf_loss_epoch = 0
         rank_loss_epoch = 0
         nupdate = 0
@@ -148,6 +154,12 @@ class PPOAlgorithm(BaseAlgorithm):
                     death_event_loss = losses.get("death_event_loss")
                     if death_event_loss is None:
                         death_event_loss = pi_loss.new_zeros(())
+                    health_vf_loss = losses.get("health_vf_loss")
+                    if health_vf_loss is None:
+                        health_vf_loss = pi_loss.new_zeros(())
+                    achievement_vf_loss = losses.get("achievement_vf_loss")
+                    if achievement_vf_loss is None:
+                        achievement_vf_loss = pi_loss.new_zeros(())
                     health_cf_loss = losses.get("health_cf_loss")
                     if health_cf_loss is None:
                         health_cf_loss = pi_loss.new_zeros(())
@@ -162,6 +174,8 @@ class PPOAlgorithm(BaseAlgorithm):
                         + self.health_decrease_loss_coef * health_decrease_loss
                         + self.health_increase_loss_coef * health_increase_loss
                         + self.death_event_loss_coef * death_event_loss
+                        + self.health_vf_loss_coef * health_vf_loss
+                        + self.achievement_vf_loss_coef * achievement_vf_loss
                         + self.health_cf_loss_coef * health_cf_loss
                         + self.rank_loss_coef * rank_loss
                         - self.ent_coef * entropy
@@ -187,6 +201,8 @@ class PPOAlgorithm(BaseAlgorithm):
                 health_decrease_loss_epoch += health_decrease_loss.item()
                 health_increase_loss_epoch += health_increase_loss.item()
                 death_event_loss_epoch += death_event_loss.item()
+                health_vf_loss_epoch += health_vf_loss.item()
+                achievement_vf_loss_epoch += achievement_vf_loss.item()
                 health_cf_loss_epoch += health_cf_loss.item()
                 rank_loss_epoch += rank_loss.item()
                 nupdate += 1
@@ -200,6 +216,8 @@ class PPOAlgorithm(BaseAlgorithm):
         health_decrease_loss_epoch /= nupdate
         health_increase_loss_epoch /= nupdate
         death_event_loss_epoch /= nupdate
+        health_vf_loss_epoch /= nupdate
+        achievement_vf_loss_epoch /= nupdate
         health_cf_loss_epoch /= nupdate
         rank_loss_epoch /= nupdate
 
@@ -219,6 +237,10 @@ class PPOAlgorithm(BaseAlgorithm):
             train_stats["health_increase_loss"] = health_increase_loss_epoch
         if self.death_event_loss_coef > 0:
             train_stats["death_event_loss"] = death_event_loss_epoch
+        if self.health_vf_loss_coef > 0:
+            train_stats["health_vf_loss"] = health_vf_loss_epoch
+        if self.achievement_vf_loss_coef > 0:
+            train_stats["achievement_vf_loss"] = achievement_vf_loss_epoch
         if self.health_cf_loss_coef > 0:
             train_stats["health_cf_loss"] = health_cf_loss_epoch
         if self.rank_loss_coef > 0:

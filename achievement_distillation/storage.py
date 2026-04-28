@@ -39,10 +39,14 @@ class RolloutStorage:
         self.obs = th.zeros(nstep + 1, nproc, *obs_shape, device=device)
         self.actions = th.zeros(nstep, nproc, *action_shape, device=device).long()
         self.rewards = th.zeros(nstep, nproc, 1, device=device)
+        self.achievement_rewards = th.zeros(nstep, nproc, 1, device=device)
+        self.health_rewards = th.zeros(nstep, nproc, 1, device=device)
         self.masks = th.ones(nstep + 1, nproc, 1, device=device)
         self.vpreds = th.zeros(nstep + 1, nproc, 1, device=device)
         self.log_probs = th.zeros(nstep, nproc, 1, device=device)
         self.returns = th.zeros(nstep, nproc, 1, device=device)
+        self.achievement_returns = th.zeros(nstep, nproc, 1, device=device)
+        self.health_returns = th.zeros(nstep, nproc, 1, device=device)
         self.advs = th.zeros(nstep, nproc, 1, device=device)
         self.successes = th.zeros(nstep + 1, nproc, 22, device=device).long()
         self.timesteps = th.zeros(nstep + 1, nproc, 1, device=device).long()
@@ -93,6 +97,8 @@ class RolloutStorage:
         # Update states if new achievment is unlocked
         success_conds = successes != prev_successes
         success_conds = success_conds.any(dim=-1, keepdim=True)
+        achievement_rewards = (successes.float() - prev_successes.float()).clamp(min=0).sum(dim=-1, keepdim=True)
+        health_rewards = rewards - achievement_rewards
         if success_conds.any():
             with th.no_grad():
                 next_latents = model.encode(obs)
@@ -112,6 +118,8 @@ class RolloutStorage:
         self.obs[self.step + 1].copy_(obs)
         self.actions[self.step].copy_(actions)
         self.rewards[self.step].copy_(rewards)
+        self.achievement_rewards[self.step].copy_(achievement_rewards)
+        self.health_rewards[self.step].copy_(health_rewards)
         self.masks[self.step + 1].copy_(masks)
         self.vpreds[self.step].copy_(vpreds)
         self.log_probs[self.step].copy_(log_probs)
@@ -142,6 +150,10 @@ class RolloutStorage:
         self.rnn_states[0].copy_(self.rnn_states[-1])
         self.vitals[0].copy_(self.vitals[-1])
         self.done_episode_lengths.zero_()
+        self.achievement_rewards.zero_()
+        self.health_rewards.zero_()
+        self.achievement_returns.zero_()
+        self.health_returns.zero_()
         # Reset step
         self.step = 0
 
@@ -277,6 +289,8 @@ class RolloutStorage:
     def compute_returns(self, gamma: float, gae_lambda: float):
         # Compute returns
         gae = 0
+        achievement_ret = th.zeros_like(self.achievement_returns[0])
+        health_ret = th.zeros_like(self.health_returns[0])
         for step in reversed(range(self.rewards.shape[0])):
             delta = (
                 self.rewards[step]
@@ -286,6 +300,10 @@ class RolloutStorage:
             gae = delta + gamma * gae_lambda * self.masks[step + 1] * gae
             self.returns[step] = gae + self.vpreds[step]
             self.advs[step] = gae
+            achievement_ret = self.achievement_rewards[step] + gamma * self.masks[step + 1] * achievement_ret
+            health_ret = self.health_rewards[step] + gamma * self.masks[step + 1] * health_ret
+            self.achievement_returns[step] = achievement_ret
+            self.health_returns[step] = health_ret
 
         # Compute advantages
         self.advs = (self.advs - self.advs.mean()) / (self.advs.std() + 1e-8)
@@ -312,6 +330,8 @@ class RolloutStorage:
         rnn_states = self.rnn_states[:-1].view(-1, *self.rnn_states.shape[2:])
         actions = self.actions.view(-1, *self.actions.shape[2:])
         vtargs = self.returns.view(-1, *self.returns.shape[2:])
+        achievement_vtargs = self.achievement_returns.view(-1, *self.achievement_returns.shape[2:])
+        health_vtargs = self.health_returns.view(-1, *self.health_returns.shape[2:])
         log_probs = self.log_probs.view(-1, *self.log_probs.shape[2:])
         advs = self.advs.view(-1, *self.advs.shape[2:])
         phase_ids, phase_mask = self.get_phase_labels(num_phase_bins)
@@ -338,6 +358,8 @@ class RolloutStorage:
                 "rnn_states": rnn_states[indices],
                 "actions": actions[indices],
                 "vtargs": vtargs[indices],
+                "achievement_vtargs": achievement_vtargs[indices],
+                "health_vtargs": health_vtargs[indices],
                 "log_probs": log_probs[indices],
                 "advs": advs[indices],
                 "phase_ids": phase_ids[indices],
