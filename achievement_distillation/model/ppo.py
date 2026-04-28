@@ -32,6 +32,8 @@ class PPOModel(BaseModel):
         aux_on_value_features: bool = False,
         use_health_cf_rank: bool = False,
         health_cf_target: int = 2,
+        use_achievement_progress_input: bool = False,
+        achievement_progress_dim: int = 22,
     ):
         super().__init__(observation_space, action_space)
 
@@ -52,19 +54,22 @@ class PPOModel(BaseModel):
         self.hidsize = hidsize
         self.use_health_cf_rank = use_health_cf_rank
         self.health_cf_target = int(health_cf_target)
+        self.use_achievement_progress_input = use_achievement_progress_input
+        self.achievement_progress_dim = int(achievement_progress_dim)
+        fused_hidsize = hidsize + self.achievement_progress_dim if self.use_achievement_progress_input else hidsize
 
         # Heads
         num_actions = getattr(self.action_space, "n")
         self.pi_head = CategoricalActionHead(
-            insize=hidsize,
+            insize=fused_hidsize,
             num_actions=num_actions,
             **action_head_kwargs,
         )
         self.vf_tower = None
-        vf_insize = hidsize
+        vf_insize = fused_hidsize
         if value_hidsize > 0:
             self.vf_tower = FanInInitReLULayer(
-                hidsize,
+                fused_hidsize,
                 value_hidsize,
                 layer_type="linear",
                 **dense_init_norm_kwargs,
@@ -84,20 +89,20 @@ class PPOModel(BaseModel):
         self.use_short_reward_head = use_short_reward_head
         if use_short_reward_head:
             self.short_reward_mlp = FanInInitReLULayer(
-                hidsize,
-                hidsize // 2,
+                fused_hidsize,
+                fused_hidsize // 2,
                 layer_type="linear",
                 **dense_init_norm_kwargs,
             )
             self.short_reward_head = PlainMSEHead(
-                insize=hidsize // 2,
+                insize=fused_hidsize // 2,
                 outsize=1,
             )
         self.use_health_event_heads = use_health_event_heads
         self.use_death_event_head = use_death_event_head
         self.aux_head_hidsize = aux_head_hidsize
         self.aux_on_value_features = aux_on_value_features
-        aux_source_insize = vf_insize if aux_on_value_features else hidsize
+        aux_source_insize = vf_insize if aux_on_value_features else fused_hidsize
         if use_health_event_heads:
             if aux_head_hidsize > 0:
                 self.health_decrease_mlp = FanInInitReLULayer(
@@ -160,19 +165,26 @@ class PPOModel(BaseModel):
     def forward(self, obs: th.Tensor, **kwargs) -> Dict[str, th.Tensor]:
         # Pass through encoder
         latents = self.encode(obs)
+        achievement_progress = kwargs.get("achievement_progress")
+        model_latents = latents
+        if self.use_achievement_progress_input:
+            if achievement_progress is None:
+                raise ValueError("achievement_progress input is required when use_achievement_progress_input=True")
+            achievement_progress = achievement_progress.float()
+            model_latents = th.cat([latents, achievement_progress], dim=-1)
 
         # Pass through heads
-        pi_latents = latents
-        vf_latents = self.vf_tower(latents) if self.vf_tower is not None else latents
+        pi_latents = model_latents
+        vf_latents = self.vf_tower(model_latents) if self.vf_tower is not None else model_latents
         pi_logits = self.pi_head(pi_latents)
         vpreds = self.vf_head(vf_latents)
         phase_vpreds = self.phase_vf_head(vf_latents) if self.use_phase_vf_head else None
         short_reward_preds = (
-            self.short_reward_head(self.short_reward_mlp(latents))
+            self.short_reward_head(self.short_reward_mlp(model_latents))
             if self.use_short_reward_head
             else None
         )
-        aux_source = vf_latents if self.aux_on_value_features else latents
+        aux_source = vf_latents if self.aux_on_value_features else model_latents
         if self.use_health_event_heads:
             health_decrease_feats = (
                 self.health_decrease_mlp(aux_source) if self.health_decrease_mlp is not None else aux_source
@@ -193,6 +205,7 @@ class PPOModel(BaseModel):
         # Define outputs
         outputs = {
             "latents": latents,
+            "model_latents": model_latents,
             "pi_latents": pi_latents,
             "vf_latents": vf_latents,
             "pi_logits": pi_logits,
@@ -347,7 +360,10 @@ class PPOModel(BaseModel):
                             device=obs.device,
                         ),
                     )
-                    cf_outputs = self.forward(obs_cf, **kwargs)
+                    cf_kwargs = dict(kwargs)
+                    if "achievement_progress" in cf_kwargs and cf_kwargs["achievement_progress"] is not None:
+                        cf_kwargs["achievement_progress"] = cf_kwargs["achievement_progress"][valid_mask]
+                    cf_outputs = self.forward(obs_cf, **cf_kwargs)
                     base_values = self.vf_head.denormalize(vpreds[valid_mask]).squeeze(-1)
                     cf_values = self.vf_head.denormalize(cf_outputs["vpreds"]).squeeze(-1)
                     health_cf_loss = th.relu(health_cf_margin - (base_values - cf_values)).mean()

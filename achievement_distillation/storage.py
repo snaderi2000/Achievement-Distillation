@@ -63,6 +63,7 @@ class RolloutStorage:
             "obs": self.obs[step],
             "states": self.states[step],
             "rnn_states": self.rnn_states[step],
+            "achievement_progress": self.successes[step].float(),
         }
         return inputs
 
@@ -317,6 +318,7 @@ class RolloutStorage:
         phase_ids = phase_ids.view(-1, 1)
         phase_mask = phase_mask.view(-1, 1)
         progress_bins = self.get_progress_bins(num_progress_bins).view(-1, 1)
+        achievement_progress = self.successes[:-1].contiguous().view(-1, self.successes.shape[-1]).float()
         short_reward_targets, short_reward_mask = self.get_short_reward_targets(short_reward_horizon)
         short_reward_targets = short_reward_targets.view(-1, 1)
         short_reward_mask = short_reward_mask.view(-1, 1)
@@ -341,6 +343,7 @@ class RolloutStorage:
                 "phase_ids": phase_ids[indices],
                 "phase_mask": phase_mask[indices],
                 "progress_bins": progress_bins[indices],
+                "achievement_progress": achievement_progress[indices],
                 "short_reward_targets": short_reward_targets[indices],
                 "short_reward_mask": short_reward_mask[indices],
                 "health_decrease_targets": health_decrease_targets[indices],
