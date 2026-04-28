@@ -53,6 +53,45 @@ def standardize_features(
     return (x_train - mean) / std, (x_test - mean) / std
 
 
+def split_by_episode(
+    features: th.Tensor,
+    labels: th.Tensor,
+    episode_ids: th.Tensor,
+    test_size: float,
+    seed: int,
+) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+    unique_episodes = sorted(set(int(v) for v in episode_ids.tolist()))
+    if len(unique_episodes) < 2:
+        raise ValueError("Need at least 2 episodes for an episode-disjoint split.")
+
+    train_episodes, test_episodes = train_test_split(
+        unique_episodes,
+        test_size=test_size,
+        random_state=seed,
+    )
+    train_episode_set = set(train_episodes)
+    test_episode_set = set(test_episodes)
+
+    train_mask = th.tensor(
+        [int(ep) in train_episode_set for ep in episode_ids.tolist()],
+        dtype=th.bool,
+    )
+    test_mask = th.tensor(
+        [int(ep) in test_episode_set for ep in episode_ids.tolist()],
+        dtype=th.bool,
+    )
+
+    if not train_mask.any() or not test_mask.any():
+        raise ValueError("Episode split produced an empty train or test set.")
+
+    return (
+        features[train_mask],
+        features[test_mask],
+        labels[train_mask],
+        labels[test_mask],
+    )
+
+
 def build_probe(probe_type: str, insize: int, outsize: int, hidden_size: int) -> nn.Module:
     if probe_type == "linear":
         return LinearProbe(insize, outsize)
@@ -73,6 +112,7 @@ def train_multiclass_probe(
     lr: float,
     seed: int,
     device: th.device,
+    log_prefix: str = "",
 ) -> Dict:
     model = build_probe(probe_type, x_train.shape[1], int(y_train.max().item()) + 1, hidden_size).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -120,7 +160,7 @@ def train_multiclass_probe(
                     eval_preds.extend(logits.argmax(dim=1).cpu().tolist())
                     eval_labels.extend(yb.tolist())
             print(
-                f"[probe-{probe_type}-multiclass] "
+                f"[probe-{probe_type}-multiclass{log_prefix}] "
                 f"epoch={epoch + 1}/{epochs} "
                 f"train_loss={train_loss_total / max(train_batches, 1):.4f} "
                 f"test_loss={eval_loss_total / max(eval_batches, 1):.4f} "
@@ -158,6 +198,7 @@ def train_binary_probe(
     lr: float,
     seed: int,
     device: th.device,
+    log_prefix: str = "",
 ) -> Dict:
     model = build_probe(probe_type, x_train.shape[1], 1, hidden_size).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -210,7 +251,7 @@ def train_binary_probe(
                     eval_preds.extend(pred.tolist())
                     eval_labels.extend(yb.long().view(-1).tolist())
             print(
-                f"[probe-{probe_type}-binary] "
+                f"[probe-{probe_type}-binary{log_prefix}] "
                 f"epoch={epoch + 1}/{epochs} "
                 f"train_loss={train_loss_total / max(train_batches, 1):.4f} "
                 f"test_loss={eval_loss_total / max(eval_batches, 1):.4f} "
@@ -272,6 +313,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--test_size", type=float, default=0.2)
+    parser.add_argument("--split_mode", type=str, choices=("state", "episode"), default="state")
     parser.add_argument("--split_seed", type=int, default=22)
     parser.add_argument("--probe_seed", type=int, default=420)
     parser.add_argument("--results_json_path", type=str, default=None)
@@ -288,24 +330,37 @@ def main():
         )
 
     features = dataset[args.feature_key].float()
+    episode_ids = dataset.get("episode_ids")
     results = {
         "dataset_path": args.dataset_path,
         "feature_key": args.feature_key,
         "target": args.target,
         "probe_type": args.probe_type,
+        "split_mode": args.split_mode,
         "num_states": int(features.shape[0]),
         "feature_dim": int(features.shape[1]),
     }
 
     if args.target == "health":
         labels = get_health_labels(dataset)
-        x_train, x_test, y_train, y_test = train_test_split(
-            features,
-            labels,
-            test_size=args.test_size,
-            random_state=args.split_seed,
-            stratify=labels.numpy(),
-        )
+        if args.split_mode == "episode":
+            if episode_ids is None:
+                raise KeyError("Dataset does not contain 'episode_ids', required for split_mode=episode.")
+            x_train, x_test, y_train, y_test = split_by_episode(
+                features=features,
+                labels=labels,
+                episode_ids=episode_ids,
+                test_size=args.test_size,
+                seed=args.split_seed,
+            )
+        else:
+            x_train, x_test, y_train, y_test = train_test_split(
+                features,
+                labels,
+                test_size=args.test_size,
+                random_state=args.split_seed,
+                stratify=labels.numpy(),
+            )
         x_train, x_test = standardize_features(x_train, x_test)
         probe_results = train_multiclass_probe(
             x_train=x_train,
@@ -319,6 +374,7 @@ def main():
             lr=args.lr,
             seed=args.probe_seed,
             device=device,
+            log_prefix=f" {args.target}",
         )
         results["health"] = {
             **probe_results,
@@ -344,13 +400,24 @@ def main():
                 }
                 continue
 
-            x_train, x_test, y_train, y_test = train_test_split(
-                features,
-                labels,
-                test_size=args.test_size,
-                random_state=args.split_seed,
-                stratify=labels.numpy(),
-            )
+            if args.split_mode == "episode":
+                if episode_ids is None:
+                    raise KeyError("Dataset does not contain 'episode_ids', required for split_mode=episode.")
+                x_train, x_test, y_train, y_test = split_by_episode(
+                    features=features,
+                    labels=labels,
+                    episode_ids=episode_ids,
+                    test_size=args.test_size,
+                    seed=args.split_seed,
+                )
+            else:
+                x_train, x_test, y_train, y_test = train_test_split(
+                    features,
+                    labels,
+                    test_size=args.test_size,
+                    random_state=args.split_seed,
+                    stratify=labels.numpy(),
+                )
             x_train, x_test = standardize_features(x_train, x_test)
             task_result = train_binary_probe(
                 x_train=x_train,
@@ -364,6 +431,7 @@ def main():
                 lr=args.lr,
                 seed=args.probe_seed,
                 device=device,
+                log_prefix=f" {task_name}",
             )
             per_task[task_name] = task_result
             macro_accuracy.append(task_result["accuracy"])
