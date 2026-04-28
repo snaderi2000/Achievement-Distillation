@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch as th
+import torch.nn.functional as F
 import yaml
 
 ACTION_NAMES = [
@@ -231,6 +232,9 @@ def save_value_graph_viewer(
     dones = dataset["dones"][selected_idx].cpu().numpy()
     episode_ids = dataset["episode_ids"][selected_idx].cpu().numpy()
     step_ids = dataset["step_ids"][selected_idx].cpu().numpy()
+    rnn_state_norms = None
+    if "rnn_states" in dataset:
+        rnn_state_norms = dataset["rnn_states"][selected_idx].norm(dim=-1).cpu().numpy()
 
     coords = compute_value_ring_layout(values, step_ids, episode_ids)
     temporal_edges = build_temporal_edges(episode_ids, step_ids)
@@ -257,6 +261,7 @@ def save_value_graph_viewer(
         nodes.append(
             {
                 "id": int(idx),
+                "dataset_index": int(selected_idx[idx]),
                 "x": float(coords[idx, 0]),
                 "y": float(coords[idx, 1]),
                 "value": float(values[idx]),
@@ -272,6 +277,7 @@ def save_value_graph_viewer(
                 "achieved_tasks": achieved,
                 "new_achievements": full_first_unlocks[int(selected_idx[idx])],
                 "achievement_counts": achievements[idx].tolist(),
+                "rnn_state_norm": None if rnn_state_norms is None else float(rnn_state_norms[idx]),
             }
         )
 
@@ -531,12 +537,14 @@ def save_value_graph_viewer(
       <section class="card preview-wrap">
         <canvas id="preview" class="preview-canvas" width="320" height="320"></canvas>
         <div class="meta">
+          <div><strong>Dataset Idx</strong><span id="node-dataset-index">-</span></div>
           <div><strong>Episode</strong><span id="node-episode">-</span></div>
           <div><strong>Step</strong><span id="node-step">-</span></div>
           <div><strong>Value</strong><span id="node-value">-</span></div>
           <div><strong>Reward</strong><span id="node-reward">-</span></div>
           <div><strong>Action</strong><span id="node-action">-</span></div>
           <div><strong>Done</strong><span id="node-done">-</span></div>
+          <div><strong>RNN Norm</strong><span id="node-rnn-norm">-</span></div>
         </div>
         <div>
           <strong style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#66806a;margin-bottom:6px;">New Achievements At Step</strong>
@@ -573,11 +581,13 @@ def save_value_graph_viewer(
     const previewCtx = previewCanvas.getContext("2d");
 
     const nodeEpisode = document.getElementById("node-episode");
+    const nodeDatasetIndex = document.getElementById("node-dataset-index");
     const nodeStep = document.getElementById("node-step");
     const nodeValue = document.getElementById("node-value");
     const nodeReward = document.getElementById("node-reward");
     const nodeAction = document.getElementById("node-action");
     const nodeDone = document.getElementById("node-done");
+    const nodeRnnNorm = document.getElementById("node-rnn-norm");
     const nodeNewTasks = document.getElementById("node-new-tasks");
     const nodeTasks = document.getElementById("node-tasks");
     const rewardRingToggle = document.getElementById("reward-ring-toggle");
@@ -849,12 +859,14 @@ def save_value_graph_viewer(
         previewCtx.font = "18px Georgia";
         previewCtx.textAlign = "center";
         previewCtx.fillText("Hover a node", previewCanvas.width / 2, previewCanvas.height / 2);
+        nodeDatasetIndex.textContent = "-";
         nodeEpisode.textContent = "-";
         nodeStep.textContent = "-";
         nodeValue.textContent = "-";
         nodeReward.textContent = "-";
         nodeAction.textContent = "-";
         nodeDone.textContent = "-";
+        nodeRnnNorm.textContent = "-";
         nodeNewTasks.textContent = "No new achievements at this step.";
         nodeTasks.textContent = "Hover a node to inspect its state.";
         return;
@@ -875,12 +887,14 @@ def save_value_graph_viewer(
       previewCtx.imageSmoothingEnabled = false;
       previewCtx.drawImage(tempCanvas, drawX, drawY, drawW, drawH);
 
+      nodeDatasetIndex.textContent = String(node.dataset_index);
       nodeEpisode.textContent = String(node.episode_id);
       nodeStep.textContent = String(node.step_id);
       nodeValue.textContent = node.value.toFixed(3);
       nodeReward.textContent = node.reward.toFixed(3);
       nodeAction.textContent = node.action_name;
       nodeDone.textContent = node.done ? "yes" : "no";
+      nodeRnnNorm.textContent = node.rnn_state_norm === null ? "-" : node.rnn_state_norm.toFixed(3);
       nodeNewTasks.textContent = node.new_achievements.length ? node.new_achievements.join(", ") : "No new achievements at this step.";
       nodeTasks.textContent = node.achieved_tasks.length ? node.achieved_tasks.join(", ") : "No achievements unlocked yet.";
     }}
@@ -1069,6 +1083,8 @@ def collect_value_dataset(
     latents: List[th.Tensor] = []
     values: List[th.Tensor] = []
     actions: List[th.Tensor] = []
+    states: List[th.Tensor] = []
+    rnn_states: List[th.Tensor] = []
     rewards: List[float] = []
     dones: List[bool] = []
     achievements: List[th.Tensor] = []
@@ -1085,9 +1101,23 @@ def collect_value_dataset(
         obs = venv.reset()
         done = False
         step_idx = 0
+        hidsize = int(getattr(model, "hidsize", 0))
+        current_states = None
+        if hidsize > 0:
+            current_states = th.zeros(1, hidsize, device=device)
+        current_successes = th.zeros(1, len(TASKS), device=device).long()
+        current_rnn_states = None
+        model_rnn_hidsize = getattr(model, "rnn_hidsize", None)
+        if model_rnn_hidsize is not None:
+            current_rnn_states = th.zeros(1, int(model_rnn_hidsize), device=device)
         while not done:
             with th.no_grad():
-                outputs = model.act(obs)
+                act_kwargs = {}
+                if current_states is not None:
+                    act_kwargs["states"] = current_states
+                if current_rnn_states is not None:
+                    act_kwargs["rnn_states"] = current_rnn_states
+                outputs = model.act(obs, **act_kwargs)
                 action = outputs["actions"]
                 value = outputs["vpreds"]
                 latent = outputs["latents"]
@@ -1098,12 +1128,39 @@ def collect_value_dataset(
             latents.append(latent.squeeze(0).detach().cpu())
             values.append(value.squeeze(0).detach().cpu())
             actions.append(action.squeeze(0).detach().cpu())
+            if current_states is not None:
+                states.append(current_states.squeeze(0).detach().cpu())
+            if current_rnn_states is not None:
+                rnn_states.append(current_rnn_states.squeeze(0).detach().cpu())
             rewards.append(float(reward.item()))
             dones.append(bool(done_tensor.item()))
             achievements.append(infos["achievements"].squeeze(0).detach().cpu())
             success_flags.append(infos["successes"].squeeze(0).detach().cpu())
             episode_ids.append(episode_idx)
             step_ids.append(step_idx)
+
+            done_mask = (done_tensor == 0).view(-1, 1)
+            next_successes = infos["successes"]
+            if current_states is not None:
+                success_changed = (next_successes != current_successes).any(dim=-1, keepdim=True)
+                next_states = current_states
+                if success_changed.any():
+                    with th.no_grad():
+                        next_latents = model.encode(next_obs)
+                    candidate_states = F.normalize(next_latents - latent, dim=-1)
+                    next_states = th.where(success_changed, candidate_states, current_states)
+                current_states = th.where(done_mask, next_states, th.zeros_like(next_states))
+            current_successes = th.where(
+                done_mask,
+                next_successes,
+                th.zeros_like(next_successes),
+            )
+            if current_rnn_states is not None:
+                next_rnn = outputs.get("next_rnn_states")
+                if next_rnn is None:
+                    current_rnn_states = None
+                else:
+                    current_rnn_states = th.where(done_mask, next_rnn, th.zeros_like(next_rnn))
 
             obs = next_obs
             done = bool(done_tensor.item())
@@ -1126,6 +1183,10 @@ def collect_value_dataset(
         "step_ids": th.tensor(step_ids, dtype=th.long),
         "task_names": TASKS,
     }
+    if states:
+        dataset["states"] = th.stack(states)
+    if rnn_states:
+        dataset["rnn_states"] = th.stack(rnn_states)
     return dataset, latest_video_path
 
 

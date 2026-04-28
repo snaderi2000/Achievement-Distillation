@@ -16,6 +16,7 @@ class ReplayState:
     env: object
     obs: np.ndarray
     states: th.Tensor
+    rnn_states: Optional[th.Tensor]
     step_id: int
     episode_id: int
 
@@ -69,11 +70,19 @@ def get_hidsize(config: Dict) -> int:
     return int(config.get("model_kwargs", {}).get("hidsize", 512))
 
 
-def score_observation(model, obs: np.ndarray, device: th.device, states: Optional[th.Tensor] = None) -> float:
+def score_observation(
+    model,
+    obs: np.ndarray,
+    device: th.device,
+    states: Optional[th.Tensor] = None,
+    rnn_states: Optional[th.Tensor] = None,
+) -> float:
     obs_tensor = obs_to_tensor(obs, device)
     kwargs = {}
     if states is not None:
         kwargs["states"] = states
+    if rnn_states is not None:
+        kwargs["rnn_states"] = rnn_states
     with th.no_grad():
         outputs = model.act(obs_tensor, **kwargs)
     return float(outputs["vpreds"].item())
@@ -91,22 +100,38 @@ def replay_to_step(
 
     env = Env(seed=eval_seed)
     hidsize = get_hidsize(config)
+    rnn_hidsize = config.get("model_kwargs", {}).get("rnn_hidsize")
 
     for episode_idx in range(target_episode + 1):
         obs = env.reset()
         states = th.zeros(1, hidsize, device=device)
+        rnn_states = None
+        if rnn_hidsize is not None:
+            rnn_states = th.zeros(1, int(rnn_hidsize), device=device)
         step_idx = 0
 
         while True:
             if episode_idx == target_episode and step_idx == target_step:
-                return ReplayState(env=env, obs=obs, states=states.clone(), step_id=step_idx, episode_id=episode_idx)
+                return ReplayState(
+                    env=env,
+                    obs=obs,
+                    states=states.clone(),
+                    rnn_states=None if rnn_states is None else rnn_states.clone(),
+                    step_id=step_idx,
+                    episode_id=episode_idx,
+                )
 
             obs_tensor = obs_to_tensor(obs, device)
+            act_kwargs = {"states": states}
+            if rnn_states is not None:
+                act_kwargs["rnn_states"] = rnn_states
             with th.no_grad():
-                outputs = model.act(obs_tensor, states=states)
+                outputs = model.act(obs_tensor, **act_kwargs)
                 action = int(outputs["actions"].item())
                 if "next_states" in outputs:
                     states = outputs["next_states"]
+                if "next_rnn_states" in outputs:
+                    rnn_states = outputs["next_rnn_states"]
 
             obs, _, done, _ = env.step(action)
             step_idx += 1
@@ -399,7 +424,7 @@ def main():
         device=device,
     )
     base_obs = replay.obs.copy()
-    base_value = score_observation(score_model, base_obs, device, replay.states)
+    base_value = score_observation(score_model, base_obs, device, replay.states, replay.rnn_states)
 
     edits_log: List[str] = []
     inventory_updates = parse_inventory_assignments(args.set_inventory)
@@ -424,7 +449,7 @@ def main():
     apply_spawn_object(replay.env, object_specs, edits_log)
 
     edited_obs = render_env(replay.env)
-    edited_value = score_observation(score_model, edited_obs, device, replay.states)
+    edited_value = score_observation(score_model, edited_obs, device, replay.states, replay.rnn_states)
 
     os.makedirs(args.output_dir, exist_ok=True)
     stem = f"{args.exp_name}-e{args.episode_id:03d}-s{args.step_id:04d}"
