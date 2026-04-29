@@ -19,6 +19,7 @@ class PPOValueCategoricalModel(BaseModel):
         hidsize: int,
         impala_kwargs: Dict = {},
         value_hidsize: int = 0,
+        detach_value_features: bool = False,
         dense_init_norm_kwargs: Dict = {},
         action_head_kwargs: Dict = {},
         value_head_kwargs: Dict = {},
@@ -39,6 +40,7 @@ class PPOValueCategoricalModel(BaseModel):
             **dense_init_norm_kwargs,
         )
         self.hidsize = hidsize
+        self.detach_value_features = bool(detach_value_features)
 
         num_actions = getattr(self.action_space, "n")
         self.pi_head = CategoricalActionHead(
@@ -75,7 +77,8 @@ class PPOValueCategoricalModel(BaseModel):
     def forward(self, obs: th.Tensor, **kwargs) -> Dict[str, th.Tensor]:
         latents = self.encode(obs)
         pi_latents = latents
-        vf_latents = self.vf_tower(latents) if self.vf_tower is not None else latents
+        vf_source = latents.detach() if self.detach_value_features else latents
+        vf_latents = self.vf_tower(vf_source) if self.vf_tower is not None else vf_source
         pi_logits = self.pi_head(pi_latents)
         value_logits = self.vf_head(vf_latents)
         vpreds = self.vf_head.expected_value(value_logits)
