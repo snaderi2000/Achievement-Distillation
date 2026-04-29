@@ -232,6 +232,8 @@ def save_value_graph_viewer(
     dones = dataset["dones"][selected_idx].cpu().numpy()
     episode_ids = dataset["episode_ids"][selected_idx].cpu().numpy()
     step_ids = dataset["step_ids"][selected_idx].cpu().numpy()
+    health_values = dataset["health_values"][selected_idx].cpu().numpy() if "health_values" in dataset else None
+    achievement_values = dataset["achievement_values"][selected_idx].cpu().numpy() if "achievement_values" in dataset else None
     action_probs = dataset["action_probs"][selected_idx].cpu().numpy() if "action_probs" in dataset else None
     memory_latents = dataset["memory_latents"][selected_idx] if "memory_latents" in dataset else None
     pi_latents = dataset["pi_latents"][selected_idx] if "pi_latents" in dataset else None
@@ -276,6 +278,8 @@ def save_value_graph_viewer(
                 "x": float(coords[idx, 0]),
                 "y": float(coords[idx, 1]),
                 "value": float(values[idx]),
+                "health_value": None if health_values is None else float(health_values[idx]),
+                "achievement_value": None if achievement_values is None else float(achievement_values[idx]),
                 "action": int(actions[idx]),
                 "reward": float(rewards[idx]),
                 "done": bool(dones[idx]),
@@ -603,6 +607,8 @@ def save_value_graph_viewer(
           <div><strong>Episode</strong><span id="node-episode">-</span></div>
           <div><strong>Step</strong><span id="node-step">-</span></div>
           <div><strong>Value</strong><span id="node-value">-</span></div>
+          <div><strong>Health Value</strong><span id="node-health-value">-</span></div>
+          <div><strong>Achievement Value</strong><span id="node-achievement-value">-</span></div>
           <div><strong>Reward</strong><span id="node-reward">-</span></div>
           <div><strong>Action</strong><span id="node-action">-</span></div>
           <div><strong>Done</strong><span id="node-done">-</span></div>
@@ -676,6 +682,8 @@ def save_value_graph_viewer(
     const nodeDatasetIndex = document.getElementById("node-dataset-index");
     const nodeStep = document.getElementById("node-step");
     const nodeValue = document.getElementById("node-value");
+    const nodeHealthValue = document.getElementById("node-health-value");
+    const nodeAchievementValue = document.getElementById("node-achievement-value");
     const nodeReward = document.getElementById("node-reward");
     const nodeAction = document.getElementById("node-action");
     const nodeDone = document.getElementById("node-done");
@@ -995,6 +1003,8 @@ def save_value_graph_viewer(
         nodeEpisode.textContent = "-";
         nodeStep.textContent = "-";
         nodeValue.textContent = "-";
+        nodeHealthValue.textContent = "-";
+        nodeAchievementValue.textContent = "-";
         nodeReward.textContent = "-";
         nodeAction.textContent = "-";
         nodeDone.textContent = "-";
@@ -1034,6 +1044,8 @@ def save_value_graph_viewer(
       nodeEpisode.textContent = String(node.episode_id);
       nodeStep.textContent = String(node.step_id);
       nodeValue.textContent = node.value.toFixed(3);
+      nodeHealthValue.textContent = formatMaybeNumber(node.health_value);
+      nodeAchievementValue.textContent = formatMaybeNumber(node.achievement_value);
       nodeReward.textContent = node.reward.toFixed(3);
       nodeAction.textContent = node.action_name;
       nodeDone.textContent = node.done ? "yes" : "no";
@@ -1241,6 +1253,8 @@ def collect_value_dataset(
     memory_latents: List[th.Tensor] = []
     pi_latents: List[th.Tensor] = []
     vf_latents: List[th.Tensor] = []
+    health_values: List[th.Tensor] = []
+    achievement_values: List[th.Tensor] = []
     states: List[th.Tensor] = []
     rnn_states: List[th.Tensor] = []
     vitals: List[th.Tensor] = []
@@ -1281,6 +1295,8 @@ def collect_value_dataset(
                 value = outputs["vpreds"]
                 latent = outputs["latents"]
                 pi_logits = outputs.get("pi_logits")
+                health_value = outputs.get("health_vpreds")
+                achievement_value = outputs.get("achievement_vpreds")
 
             next_obs, reward, done_tensor, infos = venv.step(action)
 
@@ -1296,6 +1312,10 @@ def collect_value_dataset(
                 pi_latents.append(outputs["pi_latents"].squeeze(0).detach().cpu())
             if "vf_latents" in outputs:
                 vf_latents.append(outputs["vf_latents"].squeeze(0).detach().cpu())
+            if health_value is not None:
+                health_values.append(health_value.squeeze(0).detach().cpu())
+            if achievement_value is not None:
+                achievement_values.append(achievement_value.squeeze(0).detach().cpu())
             if current_states is not None:
                 states.append(current_states.squeeze(0).detach().cpu())
             if current_rnn_states is not None:
@@ -1364,6 +1384,10 @@ def collect_value_dataset(
         dataset["pi_latents"] = th.stack(pi_latents)
     if vf_latents:
         dataset["vf_latents"] = th.stack(vf_latents)
+    if health_values:
+        dataset["health_values"] = th.stack(health_values).view(-1)
+    if achievement_values:
+        dataset["achievement_values"] = th.stack(achievement_values).view(-1)
     if vitals:
         dataset["vitals"] = th.stack(vitals)
     return dataset, latest_video_path
