@@ -207,7 +207,12 @@ class PPOAlgorithm(BaseAlgorithm):
                 health_cf_loss_epoch += health_cf_loss.item()
                 rank_loss_epoch += rank_loss.item()
                 for key, value in losses.items():
-                    if key.startswith("vf_target_") or key.startswith("vf_pred_"):
+                    if (
+                        key.startswith("vf_target_")
+                        or key.startswith("vf_pred_")
+                        or key.startswith("vf_error_")
+                        or key == "vf_explained_var"
+                    ):
                         extra_stat_sums[key] = extra_stat_sums.get(key, 0.0) + value.detach().item()
                 nupdate += 1
 

@@ -112,9 +112,18 @@ class PPOValueCategoricalModel(BaseModel):
         pi_loss = -th.min(advs * ratio, advs * ratio_clipped).mean()
 
         entropy = self.pi_head.entropy(pi_logits).mean()
+        vpreds = outputs["vpreds"]
         vf_loss = self.vf_head.cross_entropy_loss(outputs["value_logits"], vtargs).mean()
 
         losses = {"pi_loss": pi_loss, "vf_loss": vf_loss, "entropy": entropy}
-        losses["vf_pred_mean"] = outputs["vpreds"].detach().mean()
+        with th.no_grad():
+            errors = vpreds - vtargs
+            target_var = vtargs.var(unbiased=False)
+            losses["vf_pred_min"] = vpreds.min()
+            losses["vf_pred_max"] = vpreds.max()
+            losses["vf_pred_mean"] = vpreds.mean()
+            losses["vf_error_mae"] = errors.abs().mean()
+            losses["vf_error_rmse"] = (errors.square().mean()).sqrt()
+            losses["vf_explained_var"] = 1.0 - errors.var(unbiased=False) / target_var.clamp(min=1e-8)
         losses.update(self.vf_head.target_stats(vtargs))
         return losses
