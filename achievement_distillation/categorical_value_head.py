@@ -1,5 +1,3 @@
-from typing import Dict
-
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,6 +11,8 @@ class CategoricalValueHead(nn.Module):
         num_bins: int = 101,
         vmin: float = -5.0,
         vmax: float = 25.0,
+        target_mode: str = "two_hot",
+        sigma_ratio: float = 0.75,
         init_scale: float = 0.1,
     ):
         super().__init__()
@@ -20,17 +20,30 @@ class CategoricalValueHead(nn.Module):
             raise ValueError("num_bins must be at least 2")
         if vmax <= vmin:
             raise ValueError("vmax must be greater than vmin")
+        if target_mode not in ("two_hot", "hl_gauss"):
+            raise ValueError("target_mode must be 'two_hot' or 'hl_gauss'")
+        if sigma_ratio <= 0:
+            raise ValueError("sigma_ratio must be positive")
 
         self.num_bins = int(num_bins)
         self.vmin = float(vmin)
         self.vmax = float(vmax)
+        self.target_mode = target_mode
+        self.sigma_ratio = float(sigma_ratio)
         self.linear = nn.Linear(insize, self.num_bins)
         init.orthogonal_(self.linear.weight, gain=init_scale)
         init.constant_(self.linear.bias, val=0.0)
 
-        support = th.linspace(self.vmin, self.vmax, steps=self.num_bins)
+        if self.target_mode == "hl_gauss":
+            edges = th.linspace(self.vmin, self.vmax, steps=self.num_bins + 1)
+            support = 0.5 * (edges[:-1] + edges[1:])
+            self.bin_width = (self.vmax - self.vmin) / self.num_bins
+            self.register_buffer("edges", edges)
+        else:
+            support = th.linspace(self.vmin, self.vmax, steps=self.num_bins)
+            self.bin_width = (self.vmax - self.vmin) / (self.num_bins - 1)
+            self.register_buffer("edges", th.empty(0))
         self.register_buffer("support", support)
-        self.bin_width = (self.vmax - self.vmin) / (self.num_bins - 1)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         return self.linear(x)
@@ -41,6 +54,11 @@ class CategoricalValueHead(nn.Module):
         return values.unsqueeze(-1)
 
     def _target_distribution(self, targ: th.Tensor) -> th.Tensor:
+        if self.target_mode == "hl_gauss":
+            return self._hl_gauss_target_distribution(targ)
+        return self._two_hot_target_distribution(targ)
+
+    def _two_hot_target_distribution(self, targ: th.Tensor) -> th.Tensor:
         targ = targ.squeeze(-1).clamp(self.vmin, self.vmax)
         scaled = (targ - self.vmin) / self.bin_width
         lower = th.floor(scaled).long().clamp(0, self.num_bins - 1)
@@ -54,7 +72,26 @@ class CategoricalValueHead(nn.Module):
         target.scatter_add_(1, upper.unsqueeze(-1), upper_weight.unsqueeze(-1))
         return target
 
+    def _hl_gauss_target_distribution(self, targ: th.Tensor) -> th.Tensor:
+        targ = targ.squeeze(-1).clamp(self.vmin, self.vmax)
+        sigma = self.sigma_ratio * self.bin_width
+        z = (self.edges.unsqueeze(0) - targ.unsqueeze(-1)) / (sigma * (2.0 ** 0.5))
+        cdf = th.erf(z)
+        probs = cdf[:, 1:] - cdf[:, :-1]
+        probs = probs / probs.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        return probs
+
     def cross_entropy_loss(self, logits: th.Tensor, targ: th.Tensor) -> th.Tensor:
         target_dist = self._target_distribution(targ)
         log_probs = F.log_softmax(logits, dim=-1)
         return -(target_dist * log_probs).sum(dim=-1, keepdim=True)
+
+    def target_stats(self, targ: th.Tensor) -> dict[str, th.Tensor]:
+        targ = targ.detach()
+        return {
+            "vf_target_min": targ.min(),
+            "vf_target_max": targ.max(),
+            "vf_target_mean": targ.mean(),
+            "vf_target_clamp_low": (targ < self.vmin).float().mean(),
+            "vf_target_clamp_high": (targ > self.vmax).float().mean(),
+        }

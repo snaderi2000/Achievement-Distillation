@@ -114,4 +114,6 @@ class PPOValueCategoricalModel(BaseModel):
         entropy = self.pi_head.entropy(pi_logits).mean()
         vf_loss = self.vf_head.cross_entropy_loss(outputs["value_logits"], vtargs).mean()
 
-        return {"pi_loss": pi_loss, "vf_loss": vf_loss, "entropy": entropy}
+        losses = {"pi_loss": pi_loss, "vf_loss": vf_loss, "entropy": entropy}
+        losses.update(self.vf_head.target_stats(vtargs))
+        return losses

@@ -110,6 +110,7 @@ class PPOAlgorithm(BaseAlgorithm):
         achievement_vf_loss_epoch = 0
         health_cf_loss_epoch = 0
         rank_loss_epoch = 0
+        extra_stat_sums = {}
         nupdate = 0
 
         for _ in range(self.ppo_nepoch):
@@ -205,6 +206,9 @@ class PPOAlgorithm(BaseAlgorithm):
                 achievement_vf_loss_epoch += achievement_vf_loss.item()
                 health_cf_loss_epoch += health_cf_loss.item()
                 rank_loss_epoch += rank_loss.item()
+                for key, value in losses.items():
+                    if key.startswith("vf_target_"):
+                        extra_stat_sums[key] = extra_stat_sums.get(key, 0.0) + value.detach().item()
                 nupdate += 1
 
         # Compute average stats
@@ -245,6 +249,8 @@ class PPOAlgorithm(BaseAlgorithm):
             train_stats["health_cf_loss"] = health_cf_loss_epoch
         if self.rank_loss_coef > 0:
             train_stats["rank_loss"] = rank_loss_epoch
+        for key, value in extra_stat_sums.items():
+            train_stats[key] = value / nupdate
 
         return train_stats
 
