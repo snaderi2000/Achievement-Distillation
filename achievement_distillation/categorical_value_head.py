@@ -14,6 +14,7 @@ class CategoricalValueHead(nn.Module):
         target_mode: str = "two_hot",
         sigma_ratio: float = 0.75,
         init_scale: float = 0.1,
+        init_value: float = 0.0,
     ):
         super().__init__()
         if num_bins < 2:
@@ -30,9 +31,9 @@ class CategoricalValueHead(nn.Module):
         self.vmax = float(vmax)
         self.target_mode = target_mode
         self.sigma_ratio = float(sigma_ratio)
+        self.init_value = float(init_value)
         self.linear = nn.Linear(insize, self.num_bins)
         init.orthogonal_(self.linear.weight, gain=init_scale)
-        init.constant_(self.linear.bias, val=0.0)
 
         if self.target_mode == "hl_gauss":
             edges = th.linspace(self.vmin, self.vmax, steps=self.num_bins + 1)
@@ -44,6 +45,7 @@ class CategoricalValueHead(nn.Module):
             self.bin_width = (self.vmax - self.vmin) / (self.num_bins - 1)
             self.register_buffer("edges", th.empty(0))
         self.register_buffer("support", support)
+        self._init_bias_to_value(self.init_value)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         return self.linear(x)
@@ -85,6 +87,11 @@ class CategoricalValueHead(nn.Module):
         target_dist = self._target_distribution(targ)
         log_probs = F.log_softmax(logits, dim=-1)
         return -(target_dist * log_probs).sum(dim=-1, keepdim=True)
+
+    def _init_bias_to_value(self, value: float):
+        with th.no_grad():
+            target = self._target_distribution(th.tensor([[value]], dtype=self.support.dtype))
+            self.linear.bias.copy_(target.squeeze(0).clamp(min=1e-8).log())
 
     def target_stats(self, targ: th.Tensor) -> dict[str, th.Tensor]:
         targ = targ.detach()
