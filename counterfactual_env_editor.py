@@ -76,7 +76,7 @@ def score_observation(
     device: th.device,
     states: Optional[th.Tensor] = None,
     rnn_states: Optional[th.Tensor] = None,
-) -> float:
+) -> Dict[str, float]:
     obs_tensor = obs_to_tensor(obs, device)
     kwargs = {}
     if states is not None:
@@ -85,7 +85,14 @@ def score_observation(
         kwargs["rnn_states"] = rnn_states
     with th.no_grad():
         outputs = model.act(obs_tensor, **kwargs)
-    return float(outputs["vpreds"].item())
+    result = {
+        "value": float(outputs["vpreds"].item()),
+    }
+    if "health_vpreds" in outputs:
+        result["health_value"] = float(outputs["health_vpreds"].item())
+    if "achievement_vpreds" in outputs:
+        result["achievement_value"] = float(outputs["achievement_vpreds"].item())
+    return result
 
 
 def replay_to_step(
@@ -313,14 +320,29 @@ def apply_spawn_object(env, object_specs: Sequence[Tuple[int, int, str]], edits_
         edits_log.append(f"spawn@({dx},{dy})={object_name}")
 
 
-def save_side_by_side(base_obs: np.ndarray, edited_obs: np.ndarray, base_value: float, edited_value: float, output_path: str, title_suffix: str):
+def save_side_by_side(
+    base_obs: np.ndarray,
+    edited_obs: np.ndarray,
+    base_scores: Dict[str, float],
+    edited_scores: Dict[str, float],
+    output_path: str,
+    title_suffix: str,
+):
+    def panel_title(prefix: str, scores: Dict[str, float]) -> str:
+        lines = [f"{prefix}", f"value={scores['value']:.3f}"]
+        if "health_value" in scores:
+            lines.append(f"health={scores['health_value']:.3f}")
+        if "achievement_value" in scores:
+            lines.append(f"ach={scores['achievement_value']:.3f}")
+        return "\n".join(lines)
+
     fig, axes = plt.subplots(1, 2, figsize=(8.6, 4.2))
     axes[0].imshow(base_obs)
-    axes[0].set_title(f"Base\nvalue={base_value:.3f}")
+    axes[0].set_title(panel_title("Base", base_scores))
     axes[0].axis("off")
 
     axes[1].imshow(edited_obs)
-    axes[1].set_title(f"Edited\nvalue={edited_value:.3f}")
+    axes[1].set_title(panel_title("Edited", edited_scores))
     axes[1].axis("off")
 
     fig.suptitle(title_suffix)
@@ -424,7 +446,7 @@ def main():
         device=device,
     )
     base_obs = replay.obs.copy()
-    base_value = score_observation(score_model, base_obs, device, replay.states, replay.rnn_states)
+    base_scores = score_observation(score_model, base_obs, device, replay.states, replay.rnn_states)
 
     edits_log: List[str] = []
     inventory_updates = parse_inventory_assignments(args.set_inventory)
@@ -449,7 +471,7 @@ def main():
     apply_spawn_object(replay.env, object_specs, edits_log)
 
     edited_obs = render_env(replay.env)
-    edited_value = score_observation(score_model, edited_obs, device, replay.states, replay.rnn_states)
+    edited_scores = score_observation(score_model, edited_obs, device, replay.states, replay.rnn_states)
 
     os.makedirs(args.output_dir, exist_ok=True)
     stem = f"{args.exp_name}-e{args.episode_id:03d}-s{args.step_id:04d}"
@@ -457,7 +479,7 @@ def main():
     summary_path = os.path.join(args.output_dir, f"{stem}.json")
 
     title_suffix = ", ".join(edits_log) if edits_log else "No edits"
-    save_side_by_side(base_obs, edited_obs, base_value, edited_value, figure_path, title_suffix)
+    save_side_by_side(base_obs, edited_obs, base_scores, edited_scores, figure_path, title_suffix)
 
     summary = {
         "scoring_checkpoint": score_ckpt_path,
@@ -465,15 +487,23 @@ def main():
         "eval_seed": args.eval_seed,
         "episode_id": args.episode_id,
         "step_id": args.step_id,
-        "base_value": base_value,
-        "edited_value": edited_value,
-        "delta_value": edited_value - base_value,
+        "base_value": base_scores["value"],
+        "edited_value": edited_scores["value"],
+        "delta_value": edited_scores["value"] - base_scores["value"],
         "edits": edits_log,
         "player_pos_after": tuple(int(x) for x in replay.env._player.pos),
         "inventory_after": dict(replay.env._player.inventory),
         "daylight_after": float(replay.env._world.daylight),
         "figure_path": figure_path,
     }
+    if "health_value" in base_scores and "health_value" in edited_scores:
+        summary["base_health_value"] = base_scores["health_value"]
+        summary["edited_health_value"] = edited_scores["health_value"]
+        summary["delta_health_value"] = edited_scores["health_value"] - base_scores["health_value"]
+    if "achievement_value" in base_scores and "achievement_value" in edited_scores:
+        summary["base_achievement_value"] = base_scores["achievement_value"]
+        summary["edited_achievement_value"] = edited_scores["achievement_value"]
+        summary["delta_achievement_value"] = edited_scores["achievement_value"] - base_scores["achievement_value"]
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
 
