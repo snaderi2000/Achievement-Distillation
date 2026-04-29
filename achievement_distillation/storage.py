@@ -41,12 +41,14 @@ class RolloutStorage:
         self.rewards = th.zeros(nstep, nproc, 1, device=device)
         self.achievement_rewards = th.zeros(nstep, nproc, 1, device=device)
         self.health_rewards = th.zeros(nstep, nproc, 1, device=device)
+        self.survival_rewards = th.zeros(nstep, nproc, 1, device=device)
         self.masks = th.ones(nstep + 1, nproc, 1, device=device)
         self.vpreds = th.zeros(nstep + 1, nproc, 1, device=device)
         self.log_probs = th.zeros(nstep, nproc, 1, device=device)
         self.returns = th.zeros(nstep, nproc, 1, device=device)
         self.achievement_returns = th.zeros(nstep, nproc, 1, device=device)
         self.health_returns = th.zeros(nstep, nproc, 1, device=device)
+        self.survival_returns = th.zeros(nstep, nproc, 1, device=device)
         self.advs = th.zeros(nstep, nproc, 1, device=device)
         self.successes = th.zeros(nstep + 1, nproc, 22, device=device).long()
         self.timesteps = th.zeros(nstep + 1, nproc, 1, device=device).long()
@@ -91,6 +93,7 @@ class RolloutStorage:
         prev_successes = self.successes[self.step]
         prev_states = self.states[self.step]
         prev_timesteps = self.timesteps[self.step]
+        prev_vitals = self.vitals[self.step]
         # Update timesteps
         timesteps = prev_timesteps + 1
 
@@ -99,6 +102,16 @@ class RolloutStorage:
         success_conds = success_conds.any(dim=-1, keepdim=True)
         achievement_rewards = (successes.float() - prev_successes.float()).clamp(min=0).sum(dim=-1, keepdim=True)
         health_rewards = rewards - achievement_rewards
+        if vitals is not None:
+            prev_health = prev_vitals[:, 3:4].float()
+            next_health = vitals[:, 3:4].float()
+            valid_delta = (prev_timesteps > 0).float()
+            health_increase = ((next_health > prev_health) & (valid_delta > 0)).float() * 0.1
+            health_decrease = ((next_health < prev_health) & (valid_delta > 0)).float() * -0.1
+            death_penalty = ((masks == 0) & (next_health <= 0)).float() * -1.0
+            survival_rewards = health_increase + health_decrease + death_penalty
+        else:
+            survival_rewards = th.zeros_like(rewards)
         if success_conds.any():
             with th.no_grad():
                 next_latents = model.encode(obs)
@@ -120,6 +133,7 @@ class RolloutStorage:
         self.rewards[self.step].copy_(rewards)
         self.achievement_rewards[self.step].copy_(achievement_rewards)
         self.health_rewards[self.step].copy_(health_rewards)
+        self.survival_rewards[self.step].copy_(survival_rewards)
         self.masks[self.step + 1].copy_(masks)
         self.vpreds[self.step].copy_(vpreds)
         self.log_probs[self.step].copy_(log_probs)
@@ -152,8 +166,10 @@ class RolloutStorage:
         self.done_episode_lengths.zero_()
         self.achievement_rewards.zero_()
         self.health_rewards.zero_()
+        self.survival_rewards.zero_()
         self.achievement_returns.zero_()
         self.health_returns.zero_()
+        self.survival_returns.zero_()
         # Reset step
         self.step = 0
 
@@ -291,6 +307,7 @@ class RolloutStorage:
         gae = 0
         achievement_ret = th.zeros_like(self.achievement_returns[0])
         health_ret = th.zeros_like(self.health_returns[0])
+        survival_ret = th.zeros_like(self.survival_returns[0])
         for step in reversed(range(self.rewards.shape[0])):
             delta = (
                 self.rewards[step]
@@ -302,8 +319,10 @@ class RolloutStorage:
             self.advs[step] = gae
             achievement_ret = self.achievement_rewards[step] + gamma * self.masks[step + 1] * achievement_ret
             health_ret = self.health_rewards[step] + gamma * self.masks[step + 1] * health_ret
+            survival_ret = self.survival_rewards[step] + gamma * self.masks[step + 1] * survival_ret
             self.achievement_returns[step] = achievement_ret
             self.health_returns[step] = health_ret
+            self.survival_returns[step] = survival_ret
 
         # Compute advantages
         self.advs = (self.advs - self.advs.mean()) / (self.advs.std() + 1e-8)
@@ -332,6 +351,7 @@ class RolloutStorage:
         vtargs = self.returns.view(-1, *self.returns.shape[2:])
         achievement_vtargs = self.achievement_returns.view(-1, *self.achievement_returns.shape[2:])
         health_vtargs = self.health_returns.view(-1, *self.health_returns.shape[2:])
+        survival_vtargs = self.survival_returns.view(-1, *self.survival_returns.shape[2:])
         log_probs = self.log_probs.view(-1, *self.log_probs.shape[2:])
         advs = self.advs.view(-1, *self.advs.shape[2:])
         phase_ids, phase_mask = self.get_phase_labels(num_phase_bins)
@@ -360,6 +380,7 @@ class RolloutStorage:
                 "vtargs": vtargs[indices],
                 "achievement_vtargs": achievement_vtargs[indices],
                 "health_vtargs": health_vtargs[indices],
+                "survival_vtargs": survival_vtargs[indices],
                 "log_probs": log_probs[indices],
                 "advs": advs[indices],
                 "phase_ids": phase_ids[indices],

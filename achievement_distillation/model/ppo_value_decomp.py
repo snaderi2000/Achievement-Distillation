@@ -19,6 +19,7 @@ class PPOValueDecompModel(BaseModel):
         action_space: spaces.Discrete,
         hidsize: int,
         value_hidsize: int = 1024,
+        use_survival_targets: bool = False,
         impala_kwargs: Dict = {},
         dense_init_norm_kwargs: Dict = {},
         action_head_kwargs: Dict = {},
@@ -40,6 +41,7 @@ class PPOValueDecompModel(BaseModel):
             **dense_init_norm_kwargs,
         )
         self.hidsize = hidsize
+        self.use_survival_targets = use_survival_targets
 
         num_actions = getattr(self.action_space, "n")
         self.pi_head = CategoricalActionHead(
@@ -119,6 +121,7 @@ class PPOValueDecompModel(BaseModel):
         advs: th.Tensor,
         achievement_vtargs: th.Tensor,
         health_vtargs: th.Tensor,
+        survival_vtargs: th.Tensor | None = None,
         clip_param: float = 0.2,
         **kwargs,
     ) -> Dict[str, th.Tensor]:
@@ -132,7 +135,8 @@ class PPOValueDecompModel(BaseModel):
 
         total_vpreds = outputs["vpreds"]
         vf_loss = F.mse_loss(total_vpreds, vtargs)
-        health_vf_loss = self.health_vf_head.mse_loss(outputs["health_vpreds_raw"], health_vtargs).mean()
+        health_targets = survival_vtargs if (self.use_survival_targets and survival_vtargs is not None) else health_vtargs
+        health_vf_loss = self.health_vf_head.mse_loss(outputs["health_vpreds_raw"], health_targets).mean()
         achievement_vf_loss = self.achievement_vf_head.mse_loss(
             outputs["achievement_vpreds_raw"],
             achievement_vtargs,
