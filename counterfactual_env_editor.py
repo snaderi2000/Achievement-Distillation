@@ -477,8 +477,10 @@ def main():
         target_step=args.step_id,
         device=device,
     )
-    score_states = replay.states
-    score_rnn_states = replay.rnn_states
+    base_score_states = replay.states
+    base_score_rnn_states = replay.rnn_states
+    edited_score_states = replay.states
+    edited_score_rnn_states = replay.rnn_states
     donor_state = None
     if args.score_rnn_state_episode_id is not None or args.score_rnn_state_step_id is not None:
         if args.score_rnn_state_episode_id is None or args.score_rnn_state_step_id is None:
@@ -495,11 +497,11 @@ def main():
         )
         if donor_state.rnn_states is None:
             raise ValueError("Scoring model does not expose recurrent state; hidden-state swapping is unavailable.")
-        score_states = donor_state.states
-        score_rnn_states = donor_state.rnn_states
+        edited_score_states = donor_state.states
+        edited_score_rnn_states = donor_state.rnn_states
 
     base_obs = replay.obs.copy()
-    base_scores = score_observation(score_model, base_obs, device, score_states, score_rnn_states)
+    base_scores = score_observation(score_model, base_obs, device, base_score_states, base_score_rnn_states)
 
     edits_log: List[str] = []
     if donor_state is not None:
@@ -528,7 +530,7 @@ def main():
     apply_spawn_object(replay.env, object_specs, edits_log)
 
     edited_obs = render_env(replay.env)
-    edited_scores = score_observation(score_model, edited_obs, device, score_states, score_rnn_states)
+    edited_scores = score_observation(score_model, edited_obs, device, edited_score_states, edited_score_rnn_states)
 
     os.makedirs(args.output_dir, exist_ok=True)
     stem = f"{args.exp_name}-e{args.episode_id:03d}-s{args.step_id:04d}"
@@ -552,15 +554,20 @@ def main():
             {
                 "episode_id": args.score_rnn_state_episode_id,
                 "step_id": args.score_rnn_state_step_id,
-                "rnn_state_norm": rnn_state_norm(score_rnn_states),
+                "rnn_state_norm": rnn_state_norm(edited_score_rnn_states),
             }
             if donor_state is not None
             else {
                 "episode_id": args.episode_id,
                 "step_id": args.step_id,
-                "rnn_state_norm": rnn_state_norm(score_rnn_states),
+                "rnn_state_norm": rnn_state_norm(edited_score_rnn_states),
             }
         ),
+        "base_state_source": {
+            "episode_id": args.episode_id,
+            "step_id": args.step_id,
+            "rnn_state_norm": rnn_state_norm(base_score_rnn_states),
+        },
         "player_pos_after": tuple(int(x) for x in replay.env._player.pos),
         "inventory_after": dict(replay.env._player.inventory),
         "daylight_after": float(replay.env._world.daylight),
