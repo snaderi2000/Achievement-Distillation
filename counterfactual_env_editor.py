@@ -95,6 +95,12 @@ def score_observation(
     return result
 
 
+def rnn_state_norm(rnn_states: Optional[th.Tensor]) -> Optional[float]:
+    if rnn_states is None:
+        return None
+    return float(th.linalg.vector_norm(rnn_states).item())
+
+
 def replay_to_step(
     model,
     config: Dict,
@@ -300,9 +306,23 @@ def apply_spawn_object(env, object_specs: Sequence[Tuple[int, int, str]], edits_
         "arrow_down": lambda world, pos: Arrow(world, pos, np.array([0, 1], dtype=np.int64)),
     }
 
+    valid_materials = set(material_names(env))
     for dx, dy, object_name in object_specs:
+        if object_name in valid_materials:
+            pos = world_pos_from_delta(env, dx, dy)
+            _, obj = env._world[tuple(pos)]
+            if obj is env._player:
+                raise ValueError(f"Cannot set the player's current tile to material '{object_name}'.")
+            if obj is not None:
+                env._world.remove(obj)
+            env._world[tuple(pos)] = object_name
+            edits_log.append(f"material@({dx},{dy})={object_name}")
+            continue
         if object_name not in constructors:
-            raise ValueError(f"Unknown spawn object '{object_name}'. Valid objects: {valid_spawn_objects()}")
+            raise ValueError(
+                f"Unknown spawn object or material '{object_name}'. "
+                f"Valid objects: {valid_spawn_objects()}. Valid materials: {sorted(valid_materials)}"
+            )
         pos = world_pos_from_delta(env, dx, dy)
         material, obj = env._world[tuple(pos)]
         if obj is env._player:
@@ -364,6 +384,18 @@ def main():
     parser.add_argument("--eval_seed", type=int, default=123)
     parser.add_argument("--episode_id", type=int, required=True)
     parser.add_argument("--step_id", type=int, required=True)
+    parser.add_argument(
+        "--score_rnn_state_episode_id",
+        type=int,
+        default=None,
+        help="Optional donor episode whose recurrent state is used only for scoring.",
+    )
+    parser.add_argument(
+        "--score_rnn_state_step_id",
+        type=int,
+        default=None,
+        help="Optional donor step whose recurrent state is used only for scoring.",
+    )
 
     parser.add_argument("--set_health", type=int, default=None)
     parser.add_argument("--set_inventory", type=str, default=None, help="Comma-separated item=value assignments.")
@@ -445,10 +477,35 @@ def main():
         target_step=args.step_id,
         device=device,
     )
+    score_states = replay.states
+    score_rnn_states = replay.rnn_states
+    donor_state = None
+    if args.score_rnn_state_episode_id is not None or args.score_rnn_state_step_id is not None:
+        if args.score_rnn_state_episode_id is None or args.score_rnn_state_step_id is None:
+            raise ValueError(
+                "Use both --score_rnn_state_episode_id and --score_rnn_state_step_id when swapping recurrent state."
+            )
+        donor_state = replay_to_step(
+            model=score_model,
+            config=score_config,
+            eval_seed=args.eval_seed,
+            target_episode=args.score_rnn_state_episode_id,
+            target_step=args.score_rnn_state_step_id,
+            device=device,
+        )
+        if donor_state.rnn_states is None:
+            raise ValueError("Scoring model does not expose recurrent state; hidden-state swapping is unavailable.")
+        score_states = donor_state.states
+        score_rnn_states = donor_state.rnn_states
+
     base_obs = replay.obs.copy()
-    base_scores = score_observation(score_model, base_obs, device, replay.states, replay.rnn_states)
+    base_scores = score_observation(score_model, base_obs, device, score_states, score_rnn_states)
 
     edits_log: List[str] = []
+    if donor_state is not None:
+        edits_log.append(
+            f"score_rnn_state=episode{args.score_rnn_state_episode_id}:step{args.score_rnn_state_step_id}"
+        )
     inventory_updates = parse_inventory_assignments(args.set_inventory)
     move_player = parse_vec2(args.move_player) if args.move_player else None
     set_player_pos = parse_vec2(args.set_player_pos) if args.set_player_pos else None
@@ -471,7 +528,7 @@ def main():
     apply_spawn_object(replay.env, object_specs, edits_log)
 
     edited_obs = render_env(replay.env)
-    edited_scores = score_observation(score_model, edited_obs, device, replay.states, replay.rnn_states)
+    edited_scores = score_observation(score_model, edited_obs, device, score_states, score_rnn_states)
 
     os.makedirs(args.output_dir, exist_ok=True)
     stem = f"{args.exp_name}-e{args.episode_id:03d}-s{args.step_id:04d}"
@@ -491,6 +548,19 @@ def main():
         "edited_value": edited_scores["value"],
         "delta_value": edited_scores["value"] - base_scores["value"],
         "edits": edits_log,
+        "score_state_source": (
+            {
+                "episode_id": args.score_rnn_state_episode_id,
+                "step_id": args.score_rnn_state_step_id,
+                "rnn_state_norm": rnn_state_norm(score_rnn_states),
+            }
+            if donor_state is not None
+            else {
+                "episode_id": args.episode_id,
+                "step_id": args.step_id,
+                "rnn_state_norm": rnn_state_norm(score_rnn_states),
+            }
+        ),
         "player_pos_after": tuple(int(x) for x in replay.env._player.pos),
         "inventory_after": dict(replay.env._player.inventory),
         "daylight_after": float(replay.env._world.daylight),
