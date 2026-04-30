@@ -66,6 +66,21 @@ def render_env(env) -> np.ndarray:
     return env.render()
 
 
+def rotate_world_observation(obs: np.ndarray, degrees: int, inventory_rows: int) -> np.ndarray:
+    if degrees % 360 == 0:
+        return obs.copy()
+    if degrees % 360 != 180:
+        raise ValueError(
+            "--rotate_world_degrees currently supports 180 only. "
+            "The Crafter world panel is rectangular once the HUD rows are excluded, so 90/270 need a crop/pad policy."
+        )
+    if inventory_rows <= 0 or inventory_rows >= obs.shape[0]:
+        raise ValueError(f"Invalid inventory_rows={inventory_rows} for observation height {obs.shape[0]}.")
+    rotated = obs.copy()
+    rotated[:-inventory_rows] = np.rot90(obs[:-inventory_rows], k=2)
+    return rotated
+
+
 def get_hidsize(config: Dict) -> int:
     return int(config.get("model_kwargs", {}).get("hidsize", 512))
 
@@ -403,6 +418,18 @@ def main():
     parser.add_argument("--set_player_pos", type=str, default=None, help="Absolute world position x,y.")
     parser.add_argument("--set_daylight", type=float, default=None)
     parser.add_argument(
+        "--rotate_world_degrees",
+        type=int,
+        default=0,
+        help="Rotate only the visible world pixels in observation space. Inventory/HUD rows are left unchanged.",
+    )
+    parser.add_argument(
+        "--inventory_rows",
+        type=int,
+        default=16,
+        help="Number of bottom observation rows treated as inventory/HUD for observation-space edits.",
+    )
+    parser.add_argument(
         "--clear_object",
         action="append",
         default=[],
@@ -530,6 +557,9 @@ def main():
     apply_spawn_object(replay.env, object_specs, edits_log)
 
     edited_obs = render_env(replay.env)
+    if args.rotate_world_degrees % 360 != 0:
+        edited_obs = rotate_world_observation(edited_obs, args.rotate_world_degrees, args.inventory_rows)
+        edits_log.append(f"rotate_world_degrees={args.rotate_world_degrees}")
     edited_scores = score_observation(score_model, edited_obs, device, edited_score_states, edited_score_rnn_states)
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -571,6 +601,7 @@ def main():
         "player_pos_after": tuple(int(x) for x in replay.env._player.pos),
         "inventory_after": dict(replay.env._player.inventory),
         "daylight_after": float(replay.env._world.daylight),
+        "inventory_rows_for_obs_edits": int(args.inventory_rows),
         "figure_path": figure_path,
     }
     if "health_value" in base_scores and "health_value" in edited_scores:
