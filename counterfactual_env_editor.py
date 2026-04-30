@@ -23,7 +23,8 @@ def crafter_inventory_rows(size=(64, 64), view=(9, 9)) -> int:
     size = np.array(size if hasattr(size, "__len__") else (size, size))
     unit = size // view
     item_rows = int(np.ceil(num_items / view[0]))
-    inventory_rows = int(item_rows * unit[1])
+    # The HUD starts one pixel above the nominal item grid in rendered frames.
+    inventory_rows = int(item_rows * unit[1]) + 1
     if inventory_rows <= 0 or inventory_rows >= size[1]:
         raise ValueError(
             f"Invalid Crafter HUD height {inventory_rows} for size={tuple(size)} and view={tuple(view)}."
@@ -99,6 +100,24 @@ def rotate_world_observation(obs: np.ndarray, degrees: int, inventory_rows: int)
     rotated = obs.copy()
     rotated[:-inventory_rows] = np.rot90(obs[:-inventory_rows], k=2)
     return rotated
+
+
+def flip_world_observation(obs: np.ndarray, mode: str, inventory_rows: int) -> np.ndarray:
+    if mode == "none":
+        return obs.copy()
+    if inventory_rows <= 0 or inventory_rows >= obs.shape[0]:
+        raise ValueError(f"Invalid inventory_rows={inventory_rows} for observation height {obs.shape[0]}.")
+    flipped = obs.copy()
+    world = obs[:-inventory_rows]
+    if mode == "horizontal":
+        flipped[:-inventory_rows] = np.flip(world, axis=1)
+    elif mode == "vertical":
+        flipped[:-inventory_rows] = np.flip(world, axis=0)
+    elif mode == "both":
+        flipped[:-inventory_rows] = np.flip(np.flip(world, axis=0), axis=1)
+    else:
+        raise ValueError("--flip_world must be one of: none, horizontal, vertical, both.")
+    return flipped
 
 
 def get_hidsize(config: Dict) -> int:
@@ -444,6 +463,12 @@ def main():
         help="Rotate only the visible world pixels in observation space. Inventory/HUD rows are left unchanged.",
     )
     parser.add_argument(
+        "--flip_world",
+        choices=["none", "horizontal", "vertical", "both"],
+        default="none",
+        help="Flip only the visible world pixels in observation space. Inventory/HUD rows are left unchanged.",
+    )
+    parser.add_argument(
         "--inventory_rows",
         type=int,
         default=None,
@@ -577,14 +602,15 @@ def main():
     apply_spawn_object(replay.env, object_specs, edits_log)
 
     edited_obs = render_env(replay.env)
+    inventory_rows = args.inventory_rows
+    if inventory_rows is None and (args.rotate_world_degrees % 360 != 0 or args.flip_world != "none"):
+        inventory_rows = crafter_inventory_rows(size=edited_obs.shape[:2])
     if args.rotate_world_degrees % 360 != 0:
-        inventory_rows = args.inventory_rows
-        if inventory_rows is None:
-            inventory_rows = crafter_inventory_rows(size=edited_obs.shape[:2])
         edited_obs = rotate_world_observation(edited_obs, args.rotate_world_degrees, inventory_rows)
         edits_log.append(f"rotate_world_degrees={args.rotate_world_degrees}")
-    else:
-        inventory_rows = args.inventory_rows
+    if args.flip_world != "none":
+        edited_obs = flip_world_observation(edited_obs, args.flip_world, inventory_rows)
+        edits_log.append(f"flip_world={args.flip_world}")
     edited_scores = score_observation(score_model, edited_obs, device, edited_score_states, edited_score_rnn_states)
 
     os.makedirs(args.output_dir, exist_ok=True)
