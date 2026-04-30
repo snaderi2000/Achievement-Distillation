@@ -240,10 +240,12 @@ def visible_world_positions(env) -> List[Tuple[Tuple[int, int], Tuple[int, int],
 
 
 def mirrored_delta(dx: int, dy: int, mode: str) -> Tuple[int, int]:
+    # Crafter stores world positions as [x, y], where x is rendered vertically
+    # and y is rendered horizontally in the image.
     if mode == "horizontal":
-        return -dx, dy
-    if mode == "vertical":
         return dx, -dy
+    if mode == "vertical":
+        return -dx, dy
     if mode == "both":
         return -dx, -dy
     raise ValueError("--flip_visible_world_state must be one of: none, horizontal, vertical, both.")
