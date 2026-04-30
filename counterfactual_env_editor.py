@@ -11,6 +11,26 @@ import torch as th
 from collect_value_map import load_model, observation_to_uint8_hwc, set_seed
 
 
+def crafter_inventory_rows(size=(64, 64), view=(9, 9)) -> int:
+    try:
+        from crafter import constants as crafter_constants
+
+        num_items = len(crafter_constants.items)
+    except Exception:
+        # Crafter 64x64 renders typically use two 7px HUD rows.
+        num_items = 18
+    view = np.array(view if hasattr(view, "__len__") else (view, view))
+    size = np.array(size if hasattr(size, "__len__") else (size, size))
+    unit = size // view
+    item_rows = int(np.ceil(num_items / view[0]))
+    inventory_rows = int(item_rows * unit[1])
+    if inventory_rows <= 0 or inventory_rows >= size[1]:
+        raise ValueError(
+            f"Invalid Crafter HUD height {inventory_rows} for size={tuple(size)} and view={tuple(view)}."
+        )
+    return inventory_rows
+
+
 @dataclass
 class ReplayState:
     env: object
@@ -426,8 +446,8 @@ def main():
     parser.add_argument(
         "--inventory_rows",
         type=int,
-        default=16,
-        help="Number of bottom observation rows treated as inventory/HUD for observation-space edits.",
+        default=None,
+        help="Number of bottom observation rows treated as inventory/HUD for observation-space edits. Defaults to Crafter layout.",
     )
     parser.add_argument(
         "--clear_object",
@@ -558,8 +578,13 @@ def main():
 
     edited_obs = render_env(replay.env)
     if args.rotate_world_degrees % 360 != 0:
-        edited_obs = rotate_world_observation(edited_obs, args.rotate_world_degrees, args.inventory_rows)
+        inventory_rows = args.inventory_rows
+        if inventory_rows is None:
+            inventory_rows = crafter_inventory_rows(size=edited_obs.shape[:2])
+        edited_obs = rotate_world_observation(edited_obs, args.rotate_world_degrees, inventory_rows)
         edits_log.append(f"rotate_world_degrees={args.rotate_world_degrees}")
+    else:
+        inventory_rows = args.inventory_rows
     edited_scores = score_observation(score_model, edited_obs, device, edited_score_states, edited_score_rnn_states)
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -601,7 +626,7 @@ def main():
         "player_pos_after": tuple(int(x) for x in replay.env._player.pos),
         "inventory_after": dict(replay.env._player.inventory),
         "daylight_after": float(replay.env._world.daylight),
-        "inventory_rows_for_obs_edits": int(args.inventory_rows),
+        "inventory_rows_for_obs_edits": None if inventory_rows is None else int(inventory_rows),
         "figure_path": figure_path,
     }
     if "health_value" in base_scores and "health_value" in edited_scores:
