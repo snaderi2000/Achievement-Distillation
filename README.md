@@ -41,6 +41,32 @@ If you want to evaluate an agent on a new environment, you can use the following
 python eval.py --exp_name [your exp name] --timestamp [your timestamp]
 ```
 
+## Offline affordance probe
+
+To study whether trained PPO states with more tools, resources, or progress are more controllable, you can collect offline transitions and train an inverse-dynamics probe. This does not modify PPO rewards.
+
+```bash
+python collect_affordance_transitions.py \
+  --exp_name ppo \
+  --timestamp debug \
+  --train_seed 0 \
+  --ckpt_epoch 250 \
+  --num_transitions 100000 \
+  --output_path affordance_transitions.pt
+
+python train_affordance_inverse_model.py \
+  --dataset_path affordance_transitions.pt \
+  --output_dir affordance_probe \
+  --epochs 10
+
+python analyze_affordance_probe.py \
+  --dataset_path affordance_transitions.pt \
+  --model_path affordance_probe/inverse_model_best.pt \
+  --output_dir affordance_analysis
+```
+
+The analysis writes `summary.json`, `group_stats.csv`, `empowerment_scores.npz`, and plots when matplotlib is available. The main probe score is the inverse model's true-action probability: higher means the action was easier to infer from the state transition, which is used as a first-pass affordance/controllability proxy.
+
 
 ## Value dataset export
 
