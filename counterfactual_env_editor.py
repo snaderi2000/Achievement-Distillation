@@ -569,13 +569,19 @@ def main():
         "--flip_world",
         choices=["none", "horizontal", "vertical", "both"],
         default="none",
-        help="Flip only the visible world pixels in observation space. Inventory/HUD rows are left unchanged.",
+        help=(
+            "Flip only the visible world pixels in observation space. Inventory/HUD rows are left unchanged. "
+            "Use this for image-level mirror counterfactuals because it mirrors both locations and sprites/textures."
+        ),
     )
     parser.add_argument(
         "--flip_visible_world_state",
         choices=["none", "horizontal", "vertical", "both"],
         default="none",
-        help="Flip visible materials and object locations in simulator state, then re-render.",
+        help=(
+            "Experimental: flip visible materials and object locations in simulator state, then re-render. "
+            "This keeps canonical unmirrored sprites, so it is not a faithful image mirror."
+        ),
     )
     parser.add_argument(
         "--inventory_rows",
