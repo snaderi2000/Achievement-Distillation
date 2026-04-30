@@ -357,6 +357,9 @@ def apply_flip_visible_world_state(env, mode: str, edits_log: List[str]):
 
     for obj in objects.values():
         env._world.remove(obj)
+        # Crafter marks removed objects as inert; reset before re-inserting.
+        if hasattr(obj, "removed"):
+            obj.removed = False
 
     for cell_index, material in materials.items():
         target_cell = mirrored_cell_index(cell_index[0], cell_index[1], local_grid, mode)
@@ -370,9 +373,15 @@ def apply_flip_visible_world_state(env, mode: str, edits_log: List[str]):
         target_pos = cell_to_world.get(target_cell)
         if target_pos is None:
             continue
+        _, target_obj = env._world[target_pos]
+        if target_obj is not None:
+            raise ValueError(
+                f"Cannot flip {type(obj).__name__} from visible cell {cell_index} to occupied cell "
+                f"{target_cell} at {target_pos} containing {type(target_obj).__name__}."
+            )
         flip_object_direction_attrs(obj, mode)
+        obj.pos = np.array(target_pos, dtype=np.int64)
         env._world.add(obj)
-        env._world.move(obj, target_pos)
         moved += 1
 
     flip_object_direction_attrs(env._player, mode)
