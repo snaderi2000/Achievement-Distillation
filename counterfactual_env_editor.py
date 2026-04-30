@@ -278,6 +278,42 @@ def flip_object_direction_attrs(obj, mode: str):
             pass
 
 
+def orientation_attrs(obj) -> Dict[str, object]:
+    attrs = {}
+    for attr in ("facing", "_facing", "direction", "_direction", "dir", "_dir"):
+        if not hasattr(obj, attr):
+            continue
+        try:
+            value = getattr(obj, attr)
+        except Exception:
+            continue
+        if callable(value):
+            continue
+        attrs[attr] = value
+    return attrs
+
+
+def print_visible_object_orientations(env):
+    print(json.dumps(visible_object_orientation_report(env), indent=2, default=str))
+
+
+def visible_object_orientation_report(env) -> List[Dict[str, object]]:
+    rows = []
+    for cell_index, world_pos, material, obj in visible_world_cells(env):
+        if obj is None:
+            continue
+        rows.append(
+            {
+                "cell": cell_index,
+                "world_pos": world_pos,
+                "material": material,
+                "object": type(obj).__name__,
+                "orientation_attrs": orientation_attrs(obj),
+            }
+        )
+    return rows
+
+
 def visible_world_cells(env) -> List[Tuple[Tuple[int, int], Tuple[int, int], str, object]]:
     local_grid = np.asarray(env._local_view._grid, dtype=np.int64)
     center_index = local_grid // 2
@@ -339,6 +375,7 @@ def apply_flip_visible_world_state(env, mode: str, edits_log: List[str]):
         env._world.move(obj, target_pos)
         moved += 1
 
+    flip_object_direction_attrs(env._player, mode)
     edits_log.append(f"flip_visible_world_state={mode}, objects_moved={moved}")
 
 
@@ -584,6 +621,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--print_visible_object_orientations",
+        action="store_true",
+        help=(
+            "Print and save visible object positions plus orientation-like fields before and after edits. "
+            "Useful for debugging faithful flips of player facing, arrows, skeletons, cows, etc."
+        ),
+    )
+    parser.add_argument(
         "--inventory_rows",
         type=int,
         default=None,
@@ -689,6 +734,12 @@ def main():
 
     base_obs = replay.obs.copy()
     base_scores = score_observation(score_model, base_obs, device, base_score_states, base_score_rnn_states)
+    base_orientation_report = (
+        visible_object_orientation_report(replay.env) if args.print_visible_object_orientations else None
+    )
+    if args.print_visible_object_orientations:
+        print("Visible object orientations before edits:")
+        print(json.dumps(base_orientation_report, indent=2, default=str))
 
     edits_log: List[str] = []
     if donor_state is not None:
@@ -727,6 +778,12 @@ def main():
     if args.flip_world != "none":
         edited_obs = flip_world_observation(edited_obs, args.flip_world, inventory_rows)
         edits_log.append(f"flip_world={args.flip_world}")
+    edited_orientation_report = (
+        visible_object_orientation_report(replay.env) if args.print_visible_object_orientations else None
+    )
+    if args.print_visible_object_orientations:
+        print("Visible object orientations after env-state edits:")
+        print(json.dumps(edited_orientation_report, indent=2, default=str))
     edited_scores = score_observation(score_model, edited_obs, device, edited_score_states, edited_score_rnn_states)
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -771,6 +828,9 @@ def main():
         "inventory_rows_for_obs_edits": None if inventory_rows is None else int(inventory_rows),
         "figure_path": figure_path,
     }
+    if args.print_visible_object_orientations:
+        summary["visible_object_orientations_before"] = base_orientation_report
+        summary["visible_object_orientations_after_env_edits"] = edited_orientation_report
     if "health_value" in base_scores and "health_value" in edited_scores:
         summary["base_health_value"] = base_scores["health_value"]
         summary["edited_health_value"] = edited_scores["health_value"]
