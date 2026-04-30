@@ -240,12 +240,10 @@ def visible_world_positions(env) -> List[Tuple[Tuple[int, int], Tuple[int, int],
 
 
 def mirrored_delta(dx: int, dy: int, mode: str) -> Tuple[int, int]:
-    # Crafter stores world positions as [x, y], where x is rendered vertically
-    # and y is rendered horizontally in the image.
     if mode == "horizontal":
-        return dx, -dy
-    if mode == "vertical":
         return -dx, dy
+    if mode == "vertical":
+        return dx, -dy
     if mode == "both":
         return -dx, -dy
     raise ValueError("--flip_visible_world_state must be one of: none, horizontal, vertical, both.")
@@ -280,37 +278,67 @@ def flip_object_direction_attrs(obj, mode: str):
             pass
 
 
+def visible_world_cells(env) -> List[Tuple[Tuple[int, int], Tuple[int, int], str, object]]:
+    local_grid = np.asarray(env._local_view._grid, dtype=np.int64)
+    center_index = local_grid // 2
+    center_world = np.asarray(env._player.pos, dtype=np.int64)
+    world_area = np.asarray(env._world.area, dtype=np.int64)
+
+    cells = []
+    for ix in range(int(local_grid[0])):
+        for iy in range(int(local_grid[1])):
+            delta = np.array([ix, iy], dtype=np.int64) - center_index
+            pos = center_world + delta
+            if 0 <= pos[0] < world_area[0] and 0 <= pos[1] < world_area[1]:
+                material, obj = env._world[tuple(pos)]
+                cells.append(((ix, iy), (int(pos[0]), int(pos[1])), material, obj))
+    return cells
+
+
+def mirrored_cell_index(ix: int, iy: int, grid_shape: Sequence[int], mode: str) -> Tuple[int, int]:
+    if mode == "horizontal":
+        return int(grid_shape[0] - 1 - ix), int(iy)
+    if mode == "vertical":
+        return int(ix), int(grid_shape[1] - 1 - iy)
+    if mode == "both":
+        return int(grid_shape[0] - 1 - ix), int(grid_shape[1] - 1 - iy)
+    raise ValueError("--flip_visible_world_state must be one of: none, horizontal, vertical, both.")
+
+
 def apply_flip_visible_world_state(env, mode: str, edits_log: List[str]):
     if mode == "none":
         return
-    positions = visible_world_positions(env)
+    local_grid = np.asarray(env._local_view._grid, dtype=np.int64)
+    cells = visible_world_cells(env)
     materials = {}
     objects = {}
-    for (dx, dy), world_pos, material in positions:
-        key = tuple(world_pos)
-        materials[(dx, dy)] = material
-        _, obj = env._world[key]
+    cell_to_world = {}
+    for cell_index, world_pos, material, obj in cells:
+        materials[cell_index] = material
+        cell_to_world[cell_index] = tuple(world_pos)
         if obj is not None and obj is not env._player:
-            objects[(dx, dy)] = obj
+            objects[cell_index] = obj
 
     for obj in objects.values():
         env._world.remove(obj)
 
-    for dx, dy in materials:
-        target_dx, target_dy = mirrored_delta(dx, dy, mode)
-        target_pos = tuple(world_pos_from_delta(env, target_dx, target_dy))
-        env._world[target_pos] = materials[(dx, dy)]
+    for cell_index, material in materials.items():
+        target_cell = mirrored_cell_index(cell_index[0], cell_index[1], local_grid, mode)
+        target_pos = cell_to_world.get(target_cell)
+        if target_pos is not None:
+            env._world[target_pos] = material
 
     moved = 0
-    for dx, dy, obj in [(dx, dy, obj) for (dx, dy), obj in objects.items()]:
-        target_dx, target_dy = mirrored_delta(dx, dy, mode)
-        target_pos = world_pos_from_delta(env, target_dx, target_dy)
+    for cell_index, obj in objects.items():
+        target_cell = mirrored_cell_index(cell_index[0], cell_index[1], local_grid, mode)
+        target_pos = cell_to_world.get(target_cell)
+        if target_pos is None:
+            continue
         flip_object_direction_attrs(obj, mode)
         env._world.add(obj)
         env._world.move(obj, target_pos)
         moved += 1
 
-    flip_object_direction_attrs(env._player, mode)
     edits_log.append(f"flip_visible_world_state={mode}, objects_moved={moved}")
 
 
