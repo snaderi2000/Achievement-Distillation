@@ -239,6 +239,79 @@ def visible_world_positions(env) -> List[Tuple[Tuple[int, int], Tuple[int, int],
     return positions
 
 
+def mirrored_delta(dx: int, dy: int, mode: str) -> Tuple[int, int]:
+    if mode == "horizontal":
+        return -dx, dy
+    if mode == "vertical":
+        return dx, -dy
+    if mode == "both":
+        return -dx, -dy
+    raise ValueError("--flip_visible_world_state must be one of: none, horizontal, vertical, both.")
+
+
+def flip_vector(vec, mode: str):
+    arr = np.asarray(vec)
+    if arr.shape == () or arr.size < 2 or not np.issubdtype(arr.dtype, np.number):
+        return vec
+    flipped = arr.copy()
+    if mode in ("horizontal", "both"):
+        flipped[0] *= -1
+    if mode in ("vertical", "both"):
+        flipped[1] *= -1
+    if isinstance(vec, np.ndarray):
+        return flipped.astype(vec.dtype, copy=False)
+    if isinstance(vec, tuple):
+        return tuple(flipped.tolist())
+    if isinstance(vec, list):
+        return flipped.tolist()
+    return flipped
+
+
+def flip_object_direction_attrs(obj, mode: str):
+    for attr in ("direction", "_direction", "facing", "_facing", "dir", "_dir"):
+        if not hasattr(obj, attr):
+            continue
+        value = getattr(obj, attr)
+        try:
+            setattr(obj, attr, flip_vector(value, mode))
+        except Exception:
+            pass
+
+
+def apply_flip_visible_world_state(env, mode: str, edits_log: List[str]):
+    if mode == "none":
+        return
+    positions = visible_world_positions(env)
+    materials = {}
+    objects = {}
+    for (dx, dy), world_pos, material in positions:
+        key = tuple(world_pos)
+        materials[(dx, dy)] = material
+        _, obj = env._world[key]
+        if obj is not None and obj is not env._player:
+            objects[(dx, dy)] = obj
+
+    for obj in objects.values():
+        env._world.remove(obj)
+
+    for dx, dy in materials:
+        target_dx, target_dy = mirrored_delta(dx, dy, mode)
+        target_pos = tuple(world_pos_from_delta(env, target_dx, target_dy))
+        env._world[target_pos] = materials[(dx, dy)]
+
+    moved = 0
+    for dx, dy, obj in [(dx, dy, obj) for (dx, dy), obj in objects.items()]:
+        target_dx, target_dy = mirrored_delta(dx, dy, mode)
+        target_pos = world_pos_from_delta(env, target_dx, target_dy)
+        flip_object_direction_attrs(obj, mode)
+        env._world.add(obj)
+        env._world.move(obj, target_pos)
+        moved += 1
+
+    flip_object_direction_attrs(env._player, mode)
+    edits_log.append(f"flip_visible_world_state={mode}, objects_moved={moved}")
+
+
 def apply_inventory_edits(env, inventory_updates: Dict[str, int], edits_log: List[str]):
     if not inventory_updates:
         return
@@ -469,6 +542,12 @@ def main():
         help="Flip only the visible world pixels in observation space. Inventory/HUD rows are left unchanged.",
     )
     parser.add_argument(
+        "--flip_visible_world_state",
+        choices=["none", "horizontal", "vertical", "both"],
+        default="none",
+        help="Flip visible materials and object locations in simulator state, then re-render.",
+    )
+    parser.add_argument(
         "--inventory_rows",
         type=int,
         default=None,
@@ -600,6 +679,7 @@ def main():
         edits_log,
     )
     apply_spawn_object(replay.env, object_specs, edits_log)
+    apply_flip_visible_world_state(replay.env, args.flip_visible_world_state, edits_log)
 
     edited_obs = render_env(replay.env)
     inventory_rows = args.inventory_rows
