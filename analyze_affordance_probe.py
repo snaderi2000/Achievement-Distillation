@@ -62,6 +62,34 @@ def group_stats(name: str, mask: np.ndarray, values: np.ndarray) -> Dict:
     }
 
 
+def add_binary_split(rows: List[Dict], prefix: str, mask: np.ndarray, values: np.ndarray):
+    rows.append(group_stats(f"{prefix}:yes", mask, values))
+    rows.append(group_stats(f"{prefix}:no", ~mask, values))
+
+
+def add_action_conditioned_split(
+    rows: List[Dict],
+    action_names: List[str],
+    actions: np.ndarray,
+    condition_name: str,
+    condition_mask: np.ndarray,
+    values: np.ndarray,
+    min_count: int,
+):
+    for action_id, action_name in enumerate(action_names):
+        action_mask = actions == action_id
+        if int(action_mask.sum()) < min_count:
+            continue
+        rows.append(group_stats(f"action:{action_name}/{condition_name}:yes", action_mask & condition_mask, values))
+        rows.append(group_stats(f"action:{action_name}/{condition_name}:no", action_mask & ~condition_mask, values))
+
+
+def add_count_bins(rows: List[Dict], prefix: str, counts: np.ndarray, values: np.ndarray):
+    max_count = int(counts.max()) if len(counts) else 0
+    for count in range(max_count + 1):
+        rows.append(group_stats(f"{prefix}:{count}", counts == count, values))
+
+
 def is_valid_action(action_name: str, inventory_row: np.ndarray, inventory_keys: List[str]) -> bool:
     reqs = CRAFT_REQUIREMENTS.get(action_name)
     if reqs is None:
@@ -189,6 +217,37 @@ def main(args):
 
     for action_id, action_name in enumerate(action_names):
         rows.append(group_stats(f"action:{action_name}", actions == action_id, prob_empowerment))
+        rows.append(group_stats(f"action:{action_name}/valid", (actions == action_id) & valid, prob_empowerment))
+        rows.append(group_stats(f"action:{action_name}/invalid", (actions == action_id) & ~valid, prob_empowerment))
+
+    add_action_conditioned_split(
+        rows,
+        action_names,
+        actions,
+        "has_pickaxe",
+        has_any_pickaxe,
+        prob_empowerment,
+        args.min_action_count,
+    )
+    add_action_conditioned_split(
+        rows,
+        action_names,
+        actions,
+        "has_sword",
+        has_any_sword,
+        prob_empowerment,
+        args.min_action_count,
+    )
+    add_action_conditioned_split(
+        rows,
+        action_names,
+        actions,
+        "obs_changed",
+        changed,
+        prob_empowerment,
+        args.min_action_count,
+    )
+    add_count_bins(rows, "achievement_count", achievement_count.astype(np.int64), prob_empowerment)
 
     write_group_csv(os.path.join(args.output_dir, "group_stats.csv"), rows)
     np.savez_compressed(
@@ -198,6 +257,8 @@ def main(args):
         valid_action=valid,
         obs_changed=changed,
         achievement_count=achievement_count,
+        has_pickaxe=has_any_pickaxe,
+        has_sword=has_any_sword,
         step_ids=step_ids,
         actions=actions,
     )
@@ -222,6 +283,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, default="affordance_probe/inverse_model_best.pt")
     parser.add_argument("--output_dir", type=str, default="affordance_analysis")
     parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument("--min_action_count", type=int, default=100)
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
     main(args)
