@@ -12,11 +12,13 @@ import torch as th
 from collect_value_map import load_model, set_seed
 from counterfactual_env_editor import (
     apply_inventory_edits,
+    apply_spawn_object,
     material_names,
     parse_inventory_assignments,
     render_env,
     replay_to_step,
     score_observation,
+    valid_spawn_objects,
     visible_world_cells,
     world_pos_from_delta,
 )
@@ -34,6 +36,10 @@ DEFAULT_MATERIALS = [
     "diamond",
     "lava",
 ]
+
+
+def default_textures() -> List[str]:
+    return DEFAULT_MATERIALS + valid_spawn_objects()
 
 
 def parse_vec2(text: str) -> Tuple[int, int]:
@@ -73,39 +79,75 @@ def set_target_material(env, target_delta: Tuple[int, int], material: str):
     env._world[pos] = material
 
 
-def score_materials(
+def set_target_texture(env, target_delta: Tuple[int, int], texture: str, valid_materials: set[str]):
+    pos = tuple(world_pos_from_delta(env, target_delta[0], target_delta[1]))
+    _, obj = env._world[pos]
+    if obj is env._player:
+        raise ValueError("Target delta points at the player tile; use a nearby tile such as 0,1.")
+    if obj is not None:
+        env._world.remove(obj)
+    env._world[pos] = "grass"
+    if texture in valid_materials:
+        env._world[pos] = texture
+        return "material"
+    edits_log: List[str] = []
+    apply_spawn_object(env, [(target_delta[0], target_delta[1], texture)], edits_log)
+    return "object"
+
+
+def parse_texture_list(text: str, valid_materials: Sequence[str]) -> List[str]:
+    if text == "all":
+        return list(valid_materials)
+    if text == "all_textures":
+        textures = list(valid_materials)
+        for name in valid_spawn_objects():
+            if name not in textures:
+                textures.append(name)
+        return textures
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def score_textures(
     model,
     replay,
     device: th.device,
-    materials: Sequence[str],
+    textures: Sequence[str],
     target_delta: Tuple[int, int],
     background_material: str,
     clear_objects: bool,
     inventory_updates: Dict[str, int],
+    noise_texture: str | None,
+    noise_delta: Tuple[int, int],
 ):
     prepared_env = copy.deepcopy(replay.env)
+    valid_materials = set(material_names(prepared_env))
     edits_log: List[str] = []
     apply_inventory_edits(prepared_env, inventory_updates, edits_log)
     removed_objects = clear_visible_objects(prepared_env) if clear_objects else 0
     changed_tiles = make_visible_material(prepared_env, background_material)
+    if noise_texture:
+        set_target_texture(prepared_env, noise_delta, noise_texture, valid_materials)
     base_obs = render_env(prepared_env)
     base_scores = score_observation(model, base_obs, device, replay.states, replay.rnn_states)
 
     rows: List[Dict[str, object]] = []
     images = []
-    for material in materials:
+    for texture in textures:
         env_copy = copy.deepcopy(prepared_env)
-        set_target_material(env_copy, target_delta, material)
+        texture_kind = set_target_texture(env_copy, target_delta, texture, valid_materials)
         obs = render_env(env_copy)
         scores = score_observation(model, obs, device, replay.states, replay.rnn_states)
         row = {
-            "material": material,
+            "texture": texture,
+            "texture_kind": texture_kind,
             "value": scores["value"],
             "delta_from_background": scores["value"] - base_scores["value"],
             "background_value": base_scores["value"],
             "target_delta": list(target_delta),
             "background_material": background_material,
             "inventory_edits": ";".join(edits_log),
+            "noise_texture": noise_texture,
+            "noise_delta": None if noise_texture is None else list(noise_delta),
             "visible_objects_removed": removed_objects,
             "visible_tiles_set_to_background": changed_tiles,
         }
@@ -114,7 +156,7 @@ def score_materials(
         if "achievement_value" in scores:
             row["achievement_value"] = scores["achievement_value"]
         rows.append(row)
-        images.append((material, scores["value"], row["delta_from_background"], obs))
+        images.append((texture, scores["value"], row["delta_from_background"], obs))
         env_copy.close()
 
     prepared_env.close()
@@ -147,7 +189,7 @@ def save_montage(path: str, images, base_obs, base_value: float, cols: int = 4):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Probe value preference for one material tile near the Crafter player.")
+    parser = argparse.ArgumentParser(description="Probe value preference for one texture tile near the Crafter player.")
     parser.add_argument("--exp_name", type=str, required=True)
     parser.add_argument("--timestamp", type=str, required=True)
     parser.add_argument("--train_seed", type=int, required=True)
@@ -161,9 +203,19 @@ def main():
     parser.add_argument(
         "--materials",
         type=str,
-        default=",".join(DEFAULT_MATERIALS),
-        help="Comma-separated material names to test, or 'all'.",
+        default="all_textures",
+        help=(
+            "Comma-separated material/object texture names to test. "
+            "Use 'all' for materials only, or 'all_textures' for materials plus spawnable object sprites."
+        ),
     )
+    parser.add_argument(
+        "--noise_texture",
+        type=str,
+        default=None,
+        help="Optional extra texture placed at --noise_delta before sweeping target textures.",
+    )
+    parser.add_argument("--noise_delta", type=str, default="1,1", help="Relative dx,dy for optional noise texture.")
     parser.add_argument("--keep_objects", action="store_true", help="Do not clear visible non-player objects.")
     parser.add_argument("--output_dir", type=str, default="material_value_probe")
     args = parser.parse_args()
@@ -184,31 +236,37 @@ def main():
     )
     valid_materials = material_names(replay.env)
     target_delta = parse_vec2(args.target_delta)
+    noise_delta = parse_vec2(args.noise_delta)
     inventory_updates = parse_inventory_assignments(args.set_inventory)
     if args.background_material not in valid_materials:
         raise ValueError(f"Unknown background material '{args.background_material}'. Valid: {valid_materials}")
-    if args.materials == "all":
-        materials = valid_materials
-    else:
-        materials = [part.strip() for part in args.materials.split(",") if part.strip()]
-    unknown = sorted(set(materials) - set(valid_materials))
+    textures = parse_texture_list(args.materials, valid_materials)
+    valid_textures = set(valid_materials) | set(valid_spawn_objects())
+    unknown = sorted(set(textures) - valid_textures)
+    if args.noise_texture is not None and args.noise_texture not in valid_textures:
+        unknown.append(args.noise_texture)
     if unknown:
-        raise ValueError(f"Unknown materials {unknown}. Valid: {valid_materials}")
+        raise ValueError(
+            f"Unknown textures {sorted(set(unknown))}. "
+            f"Valid materials: {valid_materials}. Valid objects: {valid_spawn_objects()}"
+        )
 
-    rows, images, base_scores, base_obs = score_materials(
+    rows, images, base_scores, base_obs = score_textures(
         model=model,
         replay=replay,
         device=device,
-        materials=materials,
+        textures=textures,
         target_delta=target_delta,
         background_material=args.background_material,
         clear_objects=not args.keep_objects,
         inventory_updates=inventory_updates,
+        noise_texture=args.noise_texture,
+        noise_delta=noise_delta,
     )
 
-    csv_path = os.path.join(args.output_dir, "material_values.csv")
+    csv_path = os.path.join(args.output_dir, "texture_values.csv")
     summary_path = os.path.join(args.output_dir, "summary.json")
-    montage_path = os.path.join(args.output_dir, "material_values.png")
+    montage_path = os.path.join(args.output_dir, "texture_values.png")
     write_csv(csv_path, rows)
     save_montage(montage_path, images, base_obs, base_scores["value"])
     summary = {
@@ -219,8 +277,10 @@ def main():
         "target_delta": list(target_delta),
         "background_material": args.background_material,
         "inventory_updates": inventory_updates,
+        "noise_texture": args.noise_texture,
+        "noise_delta": None if args.noise_texture is None else list(noise_delta),
         "background_value": base_scores["value"],
-        "ranked_materials": rows,
+        "ranked_textures": rows,
         "csv_path": csv_path,
         "montage_path": montage_path,
     }
