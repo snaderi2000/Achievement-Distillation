@@ -27,21 +27,36 @@ def obs_to_tensor(obs: np.ndarray, device: th.device) -> th.Tensor:
 def scalar_stats(values: List[float]) -> Dict[str, Optional[float]]:
     if not values:
         return {
+            "min": None,
+            "q1": None,
             "mean": None,
             "median": None,
+            "q3": None,
+            "max": None,
             "std": None,
+            "abs_min": None,
+            "abs_q1": None,
             "mean_abs": None,
             "median_abs": None,
+            "abs_q3": None,
             "max_abs": None,
         }
     arr = np.asarray(values, dtype=np.float64)
+    abs_arr = np.abs(arr)
     return {
+        "min": float(np.min(arr)),
+        "q1": float(np.percentile(arr, 25)),
         "mean": float(arr.mean()),
         "median": float(np.median(arr)),
+        "q3": float(np.percentile(arr, 75)),
+        "max": float(np.max(arr)),
         "std": float(arr.std()),
-        "mean_abs": float(np.abs(arr).mean()),
-        "median_abs": float(np.median(np.abs(arr))),
-        "max_abs": float(np.abs(arr).max()),
+        "abs_min": float(np.min(abs_arr)),
+        "abs_q1": float(np.percentile(abs_arr, 25)),
+        "mean_abs": float(abs_arr.mean()),
+        "median_abs": float(np.median(abs_arr)),
+        "abs_q3": float(np.percentile(abs_arr, 75)),
+        "max_abs": float(abs_arr.max()),
     }
 
 
