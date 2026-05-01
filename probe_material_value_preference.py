@@ -11,7 +11,9 @@ import torch as th
 
 from collect_value_map import load_model, set_seed
 from counterfactual_env_editor import (
+    apply_inventory_edits,
     material_names,
+    parse_inventory_assignments,
     render_env,
     replay_to_step,
     score_observation,
@@ -79,8 +81,11 @@ def score_materials(
     target_delta: Tuple[int, int],
     background_material: str,
     clear_objects: bool,
+    inventory_updates: Dict[str, int],
 ):
     prepared_env = copy.deepcopy(replay.env)
+    edits_log: List[str] = []
+    apply_inventory_edits(prepared_env, inventory_updates, edits_log)
     removed_objects = clear_visible_objects(prepared_env) if clear_objects else 0
     changed_tiles = make_visible_material(prepared_env, background_material)
     base_obs = render_env(prepared_env)
@@ -100,6 +105,7 @@ def score_materials(
             "background_value": base_scores["value"],
             "target_delta": list(target_delta),
             "background_material": background_material,
+            "inventory_edits": ";".join(edits_log),
             "visible_objects_removed": removed_objects,
             "visible_tiles_set_to_background": changed_tiles,
         }
@@ -151,6 +157,7 @@ def main():
     parser.add_argument("--step_id", type=int, default=0)
     parser.add_argument("--target_delta", type=str, default="0,1", help="Relative dx,dy tile to edit. Default is below.")
     parser.add_argument("--background_material", type=str, default="grass")
+    parser.add_argument("--set_inventory", type=str, default=None, help="Comma-separated item=value assignments.")
     parser.add_argument(
         "--materials",
         type=str,
@@ -177,6 +184,7 @@ def main():
     )
     valid_materials = material_names(replay.env)
     target_delta = parse_vec2(args.target_delta)
+    inventory_updates = parse_inventory_assignments(args.set_inventory)
     if args.background_material not in valid_materials:
         raise ValueError(f"Unknown background material '{args.background_material}'. Valid: {valid_materials}")
     if args.materials == "all":
@@ -195,6 +203,7 @@ def main():
         target_delta=target_delta,
         background_material=args.background_material,
         clear_objects=not args.keep_objects,
+        inventory_updates=inventory_updates,
     )
 
     csv_path = os.path.join(args.output_dir, "material_values.csv")
@@ -209,6 +218,7 @@ def main():
         "step_id": args.step_id,
         "target_delta": list(target_delta),
         "background_material": args.background_material,
+        "inventory_updates": inventory_updates,
         "background_value": base_scores["value"],
         "ranked_materials": rows,
         "csv_path": csv_path,
