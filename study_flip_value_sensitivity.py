@@ -83,6 +83,28 @@ def score_flip_modes(model, base_env, base_obs, device, states, rnn_states, mode
     return row
 
 
+def save_ranked_figures_from_rows(rows: List[Dict], output_dir: str, modes: List[str], top_k: int):
+    if top_k <= 0:
+        return
+    top_dir = os.path.join(output_dir, "top_figures")
+    os.makedirs(top_dir, exist_ok=True)
+    for rank, row in enumerate(rows[:top_k], start=1):
+        for mode in modes:
+            source = row.get(f"{mode}_figure_path")
+            if not source or not os.path.exists(source):
+                continue
+            target = os.path.join(
+                top_dir,
+                f"rank{rank:03d}-ep{int(row['episode_id']):03d}-step{int(row['step_id']):04d}-{mode}.png",
+            )
+            try:
+                import shutil
+
+                shutil.copyfile(source, target)
+            except Exception as exc:
+                print(f"warning: failed to copy {source} to {target}: {exc}", flush=True)
+
+
 def collect_study_rows(args, model, config, device):
     from crafter.env import Env
 
@@ -108,8 +130,8 @@ def collect_study_rows(args, model, config, device):
             )
             if should_sample:
                 base_env = copy.deepcopy(env)
-                stem = f"ep{episode_idx:03d}-step{step_idx:04d}" if len(rows) < args.save_top_k_candidates else None
-                figure_dir = os.path.join(args.output_dir, "candidate_figures") if stem is not None else None
+                stem = f"ep{episode_idx:03d}-step{step_idx:04d}"
+                figure_dir = os.path.join(args.output_dir, "all_figures") if args.save_figures else None
                 if figure_dir is not None:
                     os.makedirs(figure_dir, exist_ok=True)
                 row = {
@@ -133,6 +155,9 @@ def collect_study_rows(args, model, config, device):
                     )
                 )
                 row["max_abs_delta"] = max(row["horizontal_abs_delta"], row["vertical_abs_delta"], row["both_abs_delta"])
+                if figure_dir is not None:
+                    for mode in modes:
+                        row[f"{mode}_figure_path"] = os.path.join(figure_dir, f"{stem}-{mode}.png")
                 rows.append(row)
                 base_env.close()
                 if len(rows) % args.print_every == 0:
@@ -196,10 +221,10 @@ def main():
     parser.add_argument("--print_every", type=int, default=10)
     parser.add_argument("--save_top_k", type=int, default=20)
     parser.add_argument(
-        "--save_top_k_candidates",
-        type=int,
-        default=0,
-        help="Debug option: save figures for the first N sampled states during rollout.",
+        "--save_figures",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save flip comparison figures during the main rollout. Enabled by default.",
     )
     parser.add_argument("--output_dir", type=str, default="flip_value_sensitivity")
     args = parser.parse_args()
@@ -225,33 +250,7 @@ def main():
     write_csv(os.path.join(args.output_dir, "sorted_by_both.csv"), by_both)
     write_csv(os.path.join(args.output_dir, "sorted_by_max_abs_delta.csv"), by_max)
 
-    top_dir = os.path.join(args.output_dir, "top_figures")
-    os.makedirs(top_dir, exist_ok=True)
-    for rank, row in enumerate(by_max[: args.save_top_k], start=1):
-        # Re-score the exact state to save clean figures for the largest shifts.
-        from counterfactual_env_editor import replay_to_step
-
-        replay = replay_to_step(
-            model=model,
-            config=config,
-            eval_seed=args.eval_seed,
-            target_episode=int(row["episode_id"]),
-            target_step=int(row["step_id"]),
-            device=device,
-        )
-        stem = f"rank{rank:03d}-ep{int(row['episode_id']):03d}-step{int(row['step_id']):04d}"
-        score_flip_modes(
-            model,
-            replay.env,
-            replay.obs.copy(),
-            device,
-            replay.states,
-            replay.rnn_states,
-            ["horizontal", "vertical", "both"],
-            save_dir=top_dir,
-            stem=stem,
-        )
-        replay.env.close()
+    save_ranked_figures_from_rows(by_max, args.output_dir, ["horizontal", "vertical", "both"], args.save_top_k)
 
     summary = {
         "checkpoint": ckpt_path,
