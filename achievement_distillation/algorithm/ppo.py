@@ -2,6 +2,7 @@ from contextlib import nullcontext
 
 import torch as th
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 from achievement_distillation.model.ppo import PPOModel
@@ -41,6 +42,11 @@ class PPOAlgorithm(BaseAlgorithm):
         rank_max_pairs_per_group: int = 8,
         grad_accum_steps: int = 1,
         use_amp: bool = False,
+        value_aug_coef: float = 0.0,
+        value_aug_start_step: int = 0,
+        value_aug_modes: list[str] | tuple[str, ...] = ("horizontal", "vertical", "both"),
+        value_aug_inventory_rows: int = 15,
+        value_aug_detach_target: bool = True,
     ):
         super().__init__(model)
         self.model: PPOModel
@@ -73,6 +79,12 @@ class PPOAlgorithm(BaseAlgorithm):
         self.grad_accum_steps = grad_accum_steps
         self.use_amp = use_amp and th.cuda.is_available()
         self.scaler = th.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.value_aug_coef = float(value_aug_coef)
+        self.value_aug_start_step = int(value_aug_start_step)
+        self.value_aug_modes = tuple(value_aug_modes)
+        self.value_aug_inventory_rows = int(value_aug_inventory_rows)
+        self.value_aug_detach_target = bool(value_aug_detach_target)
+        self.num_env_steps = 0
 
         # Optimizer
         if hasattr(model, "get_param_groups"):
@@ -110,8 +122,11 @@ class PPOAlgorithm(BaseAlgorithm):
         achievement_vf_loss_epoch = 0
         health_cf_loss_epoch = 0
         rank_loss_epoch = 0
+        value_aug_loss_epoch = 0
+        value_aug_mode_loss_epoch = {mode: 0.0 for mode in self.value_aug_modes}
         extra_stat_sums = {}
         nupdate = 0
+        value_aug_active = self._value_aug_active(storage)
 
         for _ in range(self.ppo_nepoch):
             # Get data loader
@@ -167,6 +182,10 @@ class PPOAlgorithm(BaseAlgorithm):
                     rank_loss = losses.get("rank_loss")
                     if rank_loss is None:
                         rank_loss = pi_loss.new_zeros(())
+                    value_aug_loss = pi_loss.new_zeros(())
+                    value_aug_mode_losses = {}
+                    if value_aug_active:
+                        value_aug_loss, value_aug_mode_losses = self._compute_value_aug_loss(batch)
                     loss = (
                         pi_loss
                         + self.vf_loss_coef * vf_loss
@@ -179,6 +198,7 @@ class PPOAlgorithm(BaseAlgorithm):
                         + self.achievement_vf_loss_coef * achievement_vf_loss
                         + self.health_cf_loss_coef * health_cf_loss
                         + self.rank_loss_coef * rank_loss
+                        + self.value_aug_coef * value_aug_loss
                         - self.ent_coef * entropy
                     )
 
@@ -206,6 +226,11 @@ class PPOAlgorithm(BaseAlgorithm):
                 achievement_vf_loss_epoch += achievement_vf_loss.item()
                 health_cf_loss_epoch += health_cf_loss.item()
                 rank_loss_epoch += rank_loss.item()
+                value_aug_loss_epoch += value_aug_loss.item()
+                for mode in self.value_aug_modes:
+                    mode_loss = value_aug_mode_losses.get(mode)
+                    if mode_loss is not None:
+                        value_aug_mode_loss_epoch[mode] += mode_loss.detach().item()
                 for key, value in losses.items():
                     if (
                         key.startswith("vf_target_")
@@ -229,6 +254,9 @@ class PPOAlgorithm(BaseAlgorithm):
         achievement_vf_loss_epoch /= nupdate
         health_cf_loss_epoch /= nupdate
         rank_loss_epoch /= nupdate
+        value_aug_loss_epoch /= nupdate
+        for mode in value_aug_mode_loss_epoch:
+            value_aug_mode_loss_epoch[mode] /= nupdate
 
         # Define train stats
         train_stats = {
@@ -254,9 +282,16 @@ class PPOAlgorithm(BaseAlgorithm):
             train_stats["health_cf_loss"] = health_cf_loss_epoch
         if self.rank_loss_coef > 0:
             train_stats["rank_loss"] = rank_loss_epoch
+        if self.value_aug_coef > 0:
+            train_stats["value_aug_loss"] = value_aug_loss_epoch
+            train_stats["value_aug_active"] = float(value_aug_active)
+            train_stats["value_aug_env_steps"] = float(self.num_env_steps)
+            for mode, value in value_aug_mode_loss_epoch.items():
+                train_stats[f"value_aug_loss_{mode}"] = value
         for key, value in extra_stat_sums.items():
             train_stats[key] = value / nupdate
 
+        self.num_env_steps += storage.nstep * storage.nproc
         return train_stats
 
     def _update_recurrent(self, storage: RolloutStorage):
@@ -309,3 +344,56 @@ class PPOAlgorithm(BaseAlgorithm):
         if self.use_amp:
             return th.amp.autocast("cuda")
         return nullcontext()
+
+    def _value_aug_active(self, storage: RolloutStorage) -> bool:
+        if self.value_aug_coef <= 0:
+            return False
+        next_env_steps = self.num_env_steps + storage.nstep * storage.nproc
+        return next_env_steps >= self.value_aug_start_step
+
+    def _flip_obs_world(self, obs: th.Tensor, mode: str) -> th.Tensor:
+        if mode not in ("horizontal", "vertical", "both"):
+            raise ValueError(f"Unknown value augmentation flip mode: {mode}")
+        if obs.ndim != 4:
+            raise ValueError(f"Expected obs shape [B,C,H,W] for value augmentation, got {tuple(obs.shape)}")
+        inventory_rows = self.value_aug_inventory_rows
+        if inventory_rows <= 0:
+            world = obs
+            hud = None
+        elif inventory_rows >= obs.shape[-2]:
+            raise ValueError(
+                f"value_aug_inventory_rows={inventory_rows} is invalid for observation height {obs.shape[-2]}"
+            )
+        else:
+            world = obs[:, :, :-inventory_rows, :]
+            hud = obs[:, :, -inventory_rows:, :]
+
+        flipped_world = world
+        if mode in ("horizontal", "both"):
+            flipped_world = th.flip(flipped_world, dims=(-1,))
+        if mode in ("vertical", "both"):
+            flipped_world = th.flip(flipped_world, dims=(-2,))
+        if hud is None:
+            return flipped_world
+        return th.cat([flipped_world, hud], dim=-2)
+
+    def _compute_value_aug_loss(self, batch: dict[str, th.Tensor]) -> tuple[th.Tensor, dict[str, th.Tensor]]:
+        forward_kwargs = {}
+        if "achievement_progress" in batch:
+            forward_kwargs["achievement_progress"] = batch["achievement_progress"]
+
+        base_outputs = self.model.forward(batch["obs"], **forward_kwargs)
+        base_vpreds = base_outputs["vpreds"]
+        target_vpreds = base_vpreds.detach() if self.value_aug_detach_target else base_vpreds
+
+        mode_losses = {}
+        aug_loss = base_vpreds.new_zeros(())
+        for mode in self.value_aug_modes:
+            flipped_obs = self._flip_obs_world(batch["obs"], mode)
+            flipped_outputs = self.model.forward(flipped_obs, **forward_kwargs)
+            mode_loss = F.mse_loss(flipped_outputs["vpreds"], target_vpreds)
+            mode_losses[mode] = mode_loss
+            aug_loss = aug_loss + mode_loss
+        if self.value_aug_modes:
+            aug_loss = aug_loss / len(self.value_aug_modes)
+        return aug_loss, mode_losses
