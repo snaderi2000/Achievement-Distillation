@@ -26,12 +26,21 @@ def obs_to_tensor(obs: np.ndarray, device: th.device) -> th.Tensor:
 
 def scalar_stats(values: List[float]) -> Dict[str, Optional[float]]:
     if not values:
-        return {"mean": None, "std": None, "mean_abs": None, "max_abs": None}
+        return {
+            "mean": None,
+            "median": None,
+            "std": None,
+            "mean_abs": None,
+            "median_abs": None,
+            "max_abs": None,
+        }
     arr = np.asarray(values, dtype=np.float64)
     return {
         "mean": float(arr.mean()),
+        "median": float(np.median(arr)),
         "std": float(arr.std()),
         "mean_abs": float(np.abs(arr).mean()),
+        "median_abs": float(np.median(np.abs(arr))),
         "max_abs": float(np.abs(arr).max()),
     }
 
