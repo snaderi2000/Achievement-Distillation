@@ -45,6 +45,7 @@ class PPOAlgorithm(BaseAlgorithm):
         value_aug_coef: float = 0.0,
         value_aug_start_step: int = 0,
         value_aug_modes: list[str] | tuple[str, ...] = ("horizontal", "vertical", "both"),
+        value_aug_modes_per_batch: int = 1,
         value_aug_inventory_rows: int = 15,
         value_aug_detach_target: bool = True,
     ):
@@ -82,6 +83,7 @@ class PPOAlgorithm(BaseAlgorithm):
         self.value_aug_coef = float(value_aug_coef)
         self.value_aug_start_step = int(value_aug_start_step)
         self.value_aug_modes = tuple(value_aug_modes)
+        self.value_aug_modes_per_batch = int(value_aug_modes_per_batch)
         self.value_aug_inventory_rows = int(value_aug_inventory_rows)
         self.value_aug_detach_target = bool(value_aug_detach_target)
         self.num_env_steps = 0
@@ -382,18 +384,27 @@ class PPOAlgorithm(BaseAlgorithm):
         if "achievement_progress" in batch:
             forward_kwargs["achievement_progress"] = batch["achievement_progress"]
 
-        base_outputs = self.model.forward(batch["obs"], **forward_kwargs)
-        base_vpreds = base_outputs["vpreds"]
-        target_vpreds = base_vpreds.detach() if self.value_aug_detach_target else base_vpreds
+        if self.value_aug_detach_target:
+            with th.no_grad():
+                target_vpreds = self.model.forward(batch["obs"], **forward_kwargs)["vpreds"]
+        else:
+            target_vpreds = self.model.forward(batch["obs"], **forward_kwargs)["vpreds"]
 
         mode_losses = {}
-        aug_loss = base_vpreds.new_zeros(())
-        for mode in self.value_aug_modes:
+        selected_modes = self._select_value_aug_modes()
+        aug_loss = target_vpreds.new_zeros(())
+        for mode in selected_modes:
             flipped_obs = self._flip_obs_world(batch["obs"], mode)
             flipped_outputs = self.model.forward(flipped_obs, **forward_kwargs)
             mode_loss = F.mse_loss(flipped_outputs["vpreds"], target_vpreds)
             mode_losses[mode] = mode_loss
             aug_loss = aug_loss + mode_loss
-        if self.value_aug_modes:
-            aug_loss = aug_loss / len(self.value_aug_modes)
+        if selected_modes:
+            aug_loss = aug_loss / len(selected_modes)
         return aug_loss, mode_losses
+
+    def _select_value_aug_modes(self) -> tuple[str, ...]:
+        if self.value_aug_modes_per_batch <= 0 or self.value_aug_modes_per_batch >= len(self.value_aug_modes):
+            return self.value_aug_modes
+        perm = th.randperm(len(self.value_aug_modes))[: self.value_aug_modes_per_batch]
+        return tuple(self.value_aug_modes[int(idx)] for idx in perm)
