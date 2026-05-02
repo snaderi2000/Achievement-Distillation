@@ -68,10 +68,25 @@ def state_object_counts(report: List[Dict]) -> Dict[str, int]:
     return counts
 
 
+def relative_abs_delta(delta: float, base_value: float, denom_floor: float = 0.1) -> float:
+    return abs(delta) / max(abs(base_value), denom_floor)
+
+
+def base_value_bin(base_value: float) -> str:
+    if base_value < 0.5:
+        return "base_lt_0.5"
+    if base_value < 1.5:
+        return "base_0.5_to_1.5"
+    if base_value < 3.0:
+        return "base_1.5_to_3.0"
+    return "base_gte_3.0"
+
+
 def score_flip_modes(model, base_env, base_obs, device, states, rnn_states, modes, save_dir=None, stem=None):
     base_scores = score_observation(model, base_obs, device, states, rnn_states)
     row = {
         "base_value": base_scores["value"],
+        "base_value_bin": base_value_bin(base_scores["value"]),
         "visible_objects": json.dumps(state_object_counts(visible_object_orientation_report(base_env)), sort_keys=True),
     }
     for mode in modes:
@@ -84,6 +99,10 @@ def score_flip_modes(model, base_env, base_obs, device, states, rnn_states, mode
         row[f"{mode}_value"] = value
         row[f"{mode}_delta"] = value - base_scores["value"]
         row[f"{mode}_abs_delta"] = abs(value - base_scores["value"])
+        row[f"{mode}_relative_abs_delta"] = relative_abs_delta(
+            row[f"{mode}_delta"],
+            base_scores["value"],
+        )
         row[f"{mode}_edits"] = ";".join(edits_log)
         if save_dir is not None and stem is not None:
             save_side_by_side(
@@ -170,6 +189,11 @@ def collect_study_rows(args, model, config, device):
                     )
                 )
                 row["max_abs_delta"] = max(row["horizontal_abs_delta"], row["vertical_abs_delta"], row["both_abs_delta"])
+                row["max_relative_abs_delta"] = max(
+                    row["horizontal_relative_abs_delta"],
+                    row["vertical_relative_abs_delta"],
+                    row["both_relative_abs_delta"],
+                )
                 if figure_dir is not None:
                     for mode in modes:
                         row[f"{mode}_figure_path"] = os.path.join(figure_dir, f"{stem}-{mode}.png")
@@ -221,6 +245,31 @@ def write_csv(path: str, rows: List[Dict]):
         writer.writerows(rows)
 
 
+def summarize_rows(rows: List[Dict]) -> Dict[str, object]:
+    modes = ["horizontal", "vertical", "both"]
+    return {
+        **{f"{mode}_delta": scalar_stats([row[f"{mode}_delta"] for row in rows]) for mode in modes},
+        **{
+            f"{mode}_relative_abs_delta": scalar_stats([row[f"{mode}_relative_abs_delta"] for row in rows])
+            for mode in modes
+        },
+        "max_abs_delta": scalar_stats([row["max_abs_delta"] for row in rows]),
+        "max_relative_abs_delta": scalar_stats([row["max_relative_abs_delta"] for row in rows]),
+    }
+
+
+def summarize_by_base_value_bin(rows: List[Dict]) -> Dict[str, Dict[str, object]]:
+    bins = ["base_lt_0.5", "base_0.5_to_1.5", "base_1.5_to_3.0", "base_gte_3.0"]
+    result = {}
+    for bin_name in bins:
+        bin_rows = [row for row in rows if row["base_value_bin"] == bin_name]
+        result[bin_name] = {
+            "num_states": len(bin_rows),
+            **summarize_rows(bin_rows),
+        }
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Measure PPO value sensitivity to Crafter horizontal/vertical flips.")
     parser.add_argument("--exp_name", type=str, required=True)
@@ -258,12 +307,14 @@ def main():
     by_vertical = sorted(rows, key=lambda row: row["vertical_abs_delta"], reverse=True)
     by_both = sorted(rows, key=lambda row: row["both_abs_delta"], reverse=True)
     by_max = sorted(rows, key=lambda row: row["max_abs_delta"], reverse=True)
+    by_max_relative = sorted(rows, key=lambda row: row["max_relative_abs_delta"], reverse=True)
 
     write_csv(os.path.join(args.output_dir, "all_states.csv"), rows)
     write_csv(os.path.join(args.output_dir, "sorted_by_horizontal.csv"), by_horizontal)
     write_csv(os.path.join(args.output_dir, "sorted_by_vertical.csv"), by_vertical)
     write_csv(os.path.join(args.output_dir, "sorted_by_both.csv"), by_both)
     write_csv(os.path.join(args.output_dir, "sorted_by_max_abs_delta.csv"), by_max)
+    write_csv(os.path.join(args.output_dir, "sorted_by_max_relative_abs_delta.csv"), by_max_relative)
 
     save_ranked_figures_from_rows(by_max, args.output_dir, ["horizontal", "vertical", "both"], args.save_top_k)
 
@@ -271,12 +322,12 @@ def main():
         "checkpoint": ckpt_path,
         "eval_seed": args.eval_seed,
         "num_states": len(rows),
-        "horizontal_delta": scalar_stats([row["horizontal_delta"] for row in rows]),
-        "vertical_delta": scalar_stats([row["vertical_delta"] for row in rows]),
-        "both_delta": scalar_stats([row["both_delta"] for row in rows]),
+        **summarize_rows(rows),
+        "base_value_bins": summarize_by_base_value_bin(rows),
         "top_by_horizontal": by_horizontal[: args.save_top_k],
         "top_by_vertical": by_vertical[: args.save_top_k],
         "top_by_max_abs_delta": by_max[: args.save_top_k],
+        "top_by_max_relative_abs_delta": by_max_relative[: args.save_top_k],
     }
     summary_path = os.path.join(args.output_dir, "summary.json")
     with open(summary_path, "w") as f:

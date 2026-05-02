@@ -29,7 +29,7 @@ algorithm_kwargs:
   ent_coef: 0.01
   lr: 3.0e-4
   max_grad_norm: 0.5
-  value_aug_coef: 0.5
+  value_aug_coef: 1.0
   value_aug_start_step: 10000
   value_aug_modes: ["horizontal", "vertical", "both"]
   value_aug_modes_per_batch: 1
