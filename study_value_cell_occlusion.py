@@ -311,7 +311,9 @@ def score_cell_occlusions(
             }
             row.update(world_cell_metadata(candidate.env, ix, iy))
             rows.append(row)
-    for slot_idx, item_name in enumerate(items):
+    total_inventory_slots = inventory_cols * inventory_rows
+    for slot_idx in range(total_inventory_slots):
+        item_name = items[slot_idx] if slot_idx < len(items) else f"empty_{slot_idx:02d}"
         occluded = occlude_inventory_slot(candidate.obs, slot_idx, occlusion_mode, rng)
         value = score_observation(
             model,
@@ -374,8 +376,8 @@ def save_heatmap(candidate: CandidateState, deltas: np.ndarray, inventory_deltas
     world_heatmap = np.repeat(np.repeat(deltas, cell_h, axis=0), cell_w, axis=1)
     full_heatmap[:world_h, :world_w] = world_heatmap[:world_h, :world_w]
 
-    items = inventory_items()
-    for slot_idx, _ in enumerate(items):
+    total_inventory_slots = inventory_deltas.shape[0] * inventory_deltas.shape[1]
+    for slot_idx in range(total_inventory_slots):
         row = slot_idx // inventory_deltas.shape[1]
         col = slot_idx % inventory_deltas.shape[1]
         if row >= inventory_deltas.shape[0] or np.isnan(inventory_deltas[row, col]):
