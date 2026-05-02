@@ -181,6 +181,38 @@ def inventory_slot_metadata(slot_idx: int, item_name: str) -> Dict[str, object]:
     }
 
 
+def semantic_world_pos(env, ix: int, iy: int) -> Tuple[int, int]:
+    grid = np.asarray(env._local_view._grid, dtype=np.int64)
+    center_index = grid // 2
+    center_world = np.asarray(env._player.pos, dtype=np.int64)
+    delta = np.array([ix, iy], dtype=np.int64) - center_index
+    pos = center_world + delta
+    return int(pos[0]), int(pos[1])
+
+
+def render_semantic_cell_ablation(candidate: CandidateState, ix: int, iy: int, material: str) -> np.ndarray:
+    env = copy.deepcopy(candidate.env)
+    pos = semantic_world_pos(env, ix, iy)
+    current_material, obj = env._world[pos]
+    if obj is not None and obj is not env._player:
+        env._world.remove(obj)
+    env._world[pos] = material
+    obs = env.render()
+    env.close()
+    return obs
+
+
+def render_semantic_inventory_ablation(candidate: CandidateState, item_name: str) -> np.ndarray:
+    env = copy.deepcopy(candidate.env)
+    if item_name in env._player.inventory:
+        env._player.inventory[item_name] = 0
+        if item_name == "health":
+            env._player.health = 0
+    obs = env.render()
+    env.close()
+    return obs
+
+
 def collect_candidate_states(args, model, config, device) -> List[CandidateState]:
     from crafter.env import Env
 
@@ -291,7 +323,11 @@ def score_cell_occlusions(
     rows: List[Dict[str, object]] = []
     for iy in range(grid_shape[1]):
         for ix in range(grid_shape[0]):
-            occluded = occlude_cell(candidate.obs, grid_shape, ix, iy, occlusion_mode, rng)
+            if occlusion_mode.startswith("semantic_"):
+                material = occlusion_mode.split("_", 1)[1]
+                occluded = render_semantic_cell_ablation(candidate, ix, iy, material)
+            else:
+                occluded = occlude_cell(candidate.obs, grid_shape, ix, iy, occlusion_mode, rng)
             value = score_observation(
                 model,
                 occluded,
@@ -314,7 +350,10 @@ def score_cell_occlusions(
     total_inventory_slots = inventory_cols * inventory_rows
     for slot_idx in range(total_inventory_slots):
         item_name = items[slot_idx] if slot_idx < len(items) else f"empty_{slot_idx:02d}"
-        occluded = occlude_inventory_slot(candidate.obs, slot_idx, occlusion_mode, rng)
+        if occlusion_mode.startswith("semantic_"):
+            occluded = render_semantic_inventory_ablation(candidate, item_name)
+        else:
+            occluded = occlude_inventory_slot(candidate.obs, slot_idx, occlusion_mode, rng)
         value = score_observation(
             model,
             occluded,
@@ -430,9 +469,12 @@ def main():
     parser.add_argument("--print_every", type=int, default=10)
     parser.add_argument(
         "--occlusion_mode",
-        choices=["black", "gray", "world_mean", "noise"],
+        choices=["black", "gray", "world_mean", "noise", "semantic_grass", "semantic_path"],
         default="world_mean",
-        help="How to replace the removed visible map cell.",
+        help=(
+            "How to ablate a region. Pixel modes replace rendered cells. "
+            "semantic_grass/path edits env state, re-renders world cells, and zeroes inventory items."
+        ),
     )
     parser.add_argument("--output_dir", type=str, default="value_cell_occlusion")
     args = parser.parse_args()
