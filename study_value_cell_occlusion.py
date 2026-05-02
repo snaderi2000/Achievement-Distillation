@@ -15,6 +15,7 @@ from counterfactual_env_editor import (
     crafter_inventory_rows,
     get_hidsize,
     obs_to_tensor,
+    replay_to_step,
     score_observation,
 )
 
@@ -37,14 +38,12 @@ def visible_grid_shape(env) -> Tuple[int, int]:
 
 def cell_pixel_bounds(obs: np.ndarray, grid_shape: Tuple[int, int], ix: int, iy: int) -> Tuple[int, int, int, int]:
     inventory_rows = crafter_inventory_rows(size=obs.shape[:2])
-    world_h = obs.shape[0] - inventory_rows
-    world_w = obs.shape[1]
-    cell_w = world_w // grid_shape[0]
-    cell_h = world_h // grid_shape[1]
+    cell_w = obs.shape[1] // grid_shape[0]
+    cell_h = (obs.shape[0] - inventory_rows) // grid_shape[1]
     x0 = ix * cell_w
-    x1 = min((ix + 1) * cell_w, world_w)
+    x1 = min((ix + 1) * cell_w, cell_w * grid_shape[0])
     y0 = iy * cell_h
-    y1 = min((iy + 1) * cell_h, world_h)
+    y1 = min((iy + 1) * cell_h, cell_h * grid_shape[1])
     return x0, x1, y0, y1
 
 
@@ -80,8 +79,8 @@ def inventory_slot_grid(obs: np.ndarray) -> Tuple[int, int, int, int]:
     rows = int(np.ceil(len(items) / view_cols))
     inventory_rows = crafter_inventory_rows(size=obs.shape[:2])
     slot_w = obs.shape[1] // view_cols
-    slot_h = max((inventory_rows - 1) // rows, 1)
-    y_start = obs.shape[0] - inventory_rows + 1
+    slot_h = max(inventory_rows // rows, 1)
+    y_start = obs.shape[0] - inventory_rows
     return view_cols, rows, slot_w, slot_h, y_start
 
 
@@ -184,6 +183,30 @@ def inventory_slot_metadata(slot_idx: int, item_name: str) -> Dict[str, object]:
 
 def collect_candidate_states(args, model, config, device) -> List[CandidateState]:
     from crafter.env import Env
+
+    if args.episode_id is not None or args.step_id is not None:
+        if args.episode_id is None or args.step_id is None:
+            raise ValueError("--episode_id and --step_id must be provided together.")
+        replay = replay_to_step(
+            model,
+            config,
+            args.eval_seed,
+            args.episode_id,
+            args.step_id,
+            device,
+        )
+        scores = score_observation(model, replay.obs, device, replay.states, replay.rnn_states)
+        return [
+            CandidateState(
+                episode_id=args.episode_id,
+                step_id=args.step_id,
+                obs=replay.obs.copy(),
+                env=replay.env,
+                states=replay.states.clone(),
+                rnn_states=None if replay.rnn_states is None else replay.rnn_states.clone(),
+                base_value=scores["value"],
+            )
+        ]
 
     env = Env(seed=args.eval_seed)
     hidsize = get_hidsize(config)
@@ -316,10 +339,10 @@ def score_cell_occlusions(
 
 def draw_grid(ax, obs: np.ndarray, grid_shape: Tuple[int, int]):
     inventory_rows = crafter_inventory_rows(size=obs.shape[:2])
-    world_h = obs.shape[0] - inventory_rows
-    world_w = obs.shape[1]
-    cell_w = world_w // grid_shape[0]
-    cell_h = world_h // grid_shape[1]
+    cell_w = obs.shape[1] // grid_shape[0]
+    cell_h = (obs.shape[0] - inventory_rows) // grid_shape[1]
+    world_w = cell_w * grid_shape[0]
+    world_h = cell_h * grid_shape[1]
     for ix in range(grid_shape[0] + 1):
         x = ix * cell_w
         ax.plot([x, x], [0, world_h], color="white", linewidth=0.45, alpha=0.7)
@@ -341,58 +364,34 @@ def draw_inventory_grid(ax, obs: np.ndarray):
 def save_heatmap(candidate: CandidateState, deltas: np.ndarray, inventory_deltas: np.ndarray, output_path: str, title: str):
     grid_shape = visible_grid_shape(candidate.env)
     inventory_rows = crafter_inventory_rows(size=candidate.obs.shape[:2])
-    world_h = candidate.obs.shape[0] - inventory_rows
-    world_w = candidate.obs.shape[1]
-    cell_w = world_w // grid_shape[0]
-    cell_h = world_h // grid_shape[1]
-    heatmap = np.repeat(np.repeat(deltas, cell_h, axis=0), cell_w, axis=1)
-    heatmap = np.pad(
-        heatmap,
-        ((0, max(world_h - heatmap.shape[0], 0)), (0, max(world_w - heatmap.shape[1], 0))),
-        mode="edge",
-    )[:world_h, :world_w]
+    cell_w = candidate.obs.shape[1] // grid_shape[0]
+    cell_h = (candidate.obs.shape[0] - inventory_rows) // grid_shape[1]
+    world_w = cell_w * grid_shape[0]
+    world_h = cell_h * grid_shape[1]
+    full_heatmap = np.full(candidate.obs.shape[:2], np.nan, dtype=np.float32)
+    world_heatmap = np.repeat(np.repeat(deltas, cell_h, axis=0), cell_w, axis=1)
+    full_heatmap[:world_h, :world_w] = world_heatmap[:world_h, :world_w]
 
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4), constrained_layout=True)
-    axes[0].imshow(candidate.obs)
-    axes[0].set_title(f"Original\nV={candidate.base_value:.3f}")
-    axes[0].axis("off")
-    draw_grid(axes[0], candidate.obs, grid_shape)
-    draw_inventory_grid(axes[0], candidate.obs)
-
-    vmax = max(float(np.max(np.abs(deltas))), 1e-6)
-    axes[1].imshow(candidate.obs)
-    axes[1].imshow(heatmap, cmap="coolwarm", alpha=0.62, vmin=-vmax, vmax=vmax)
-    axes[1].set_title(title)
-    axes[1].axis("off")
-    draw_grid(axes[1], candidate.obs, grid_shape)
-    draw_inventory_grid(axes[1], candidate.obs)
-
-    cell_im = axes[2].imshow(deltas, cmap="coolwarm", vmin=-vmax, vmax=vmax)
-    axes[2].set_title("Cell delta\nV(occluded) - V(base)")
-    axes[2].set_xticks(range(grid_shape[0]))
-    axes[2].set_yticks(range(grid_shape[1]))
-    axes[2].set_xlabel("visible x")
-    axes[2].set_ylabel("visible y")
-    for iy in range(grid_shape[1]):
-        for ix in range(grid_shape[0]):
-            axes[2].text(ix, iy, f"{deltas[iy, ix]:.2f}", ha="center", va="center", fontsize=6)
-    fig.colorbar(cell_im, ax=axes[2], shrink=0.8)
-
-    inv_vmax = max(float(np.nanmax(np.abs(inventory_deltas))), 1e-6)
-    inv_im = axes[3].imshow(inventory_deltas, cmap="coolwarm", vmin=-inv_vmax, vmax=inv_vmax)
-    axes[3].set_title("Inventory delta\nV(occluded) - V(base)")
-    axes[3].set_xlabel("inventory x")
-    axes[3].set_ylabel("inventory y")
     items = inventory_items()
-    for slot_idx, item_name in enumerate(items):
+    for slot_idx, _ in enumerate(items):
         row = slot_idx // inventory_deltas.shape[1]
         col = slot_idx % inventory_deltas.shape[1]
-        if row >= inventory_deltas.shape[0]:
+        if row >= inventory_deltas.shape[0] or np.isnan(inventory_deltas[row, col]):
             continue
-        label = item_name.replace("_", "\n")
-        axes[3].text(col, row - 0.23, label, ha="center", va="center", fontsize=5)
-        axes[3].text(col, row + 0.23, f"{inventory_deltas[row, col]:.2f}", ha="center", va="center", fontsize=6)
-    fig.colorbar(inv_im, ax=axes[3], shrink=0.8)
+        x0, x1, y0, y1 = inventory_slot_bounds(candidate.obs, slot_idx)
+        full_heatmap[y0:y1, x0:x1] = inventory_deltas[row, col]
+
+    vmax = max(float(np.nanmax(np.abs(full_heatmap))), 1e-6)
+    masked_heatmap = np.ma.masked_invalid(full_heatmap)
+
+    fig, ax = plt.subplots(1, 1, figsize=(6.4, 6.4), constrained_layout=True)
+    ax.imshow(candidate.obs)
+    im = ax.imshow(masked_heatmap, cmap="coolwarm", alpha=0.62, vmin=-vmax, vmax=vmax)
+    ax.set_title(f"{title}\nV={candidate.base_value:.3f}")
+    ax.axis("off")
+    draw_grid(ax, candidate.obs, grid_shape)
+    draw_inventory_grid(ax, candidate.obs)
+    fig.colorbar(im, ax=ax, shrink=0.78, label="V(occluded) - V(base)")
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
 
@@ -400,8 +399,9 @@ def save_heatmap(candidate: CandidateState, deltas: np.ndarray, inventory_deltas
 def write_csv(path: str, rows: List[Dict[str, object]]):
     if not rows:
         return
+    fieldnames = sorted({field for row in rows for field in row.keys()})
     with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -413,6 +413,8 @@ def main():
     parser.add_argument("--train_seed", type=int, required=True)
     parser.add_argument("--ckpt_epoch", type=int, required=True)
     parser.add_argument("--eval_seed", type=int, default=67)
+    parser.add_argument("--episode_id", type=int, default=None, help="Analyze one exact replayed episode. Use with --step_id.")
+    parser.add_argument("--step_id", type=int, default=None, help="Analyze one exact replayed step. Use with --episode_id.")
     parser.add_argument("--num_episodes", type=int, default=5)
     parser.add_argument("--start_step", type=int, default=0)
     parser.add_argument("--max_step", type=int, default=None)
