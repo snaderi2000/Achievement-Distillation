@@ -48,6 +48,54 @@ def cell_pixel_bounds(obs: np.ndarray, grid_shape: Tuple[int, int], ix: int, iy:
     return x0, x1, y0, y1
 
 
+def inventory_items() -> List[str]:
+    try:
+        from crafter import constants as crafter_constants
+
+        return list(crafter_constants.items)
+    except Exception:
+        return [
+            "health",
+            "food",
+            "drink",
+            "energy",
+            "wood",
+            "stone",
+            "coal",
+            "iron",
+            "diamond",
+            "sapling",
+            "wood_pickaxe",
+            "stone_pickaxe",
+            "iron_pickaxe",
+            "wood_sword",
+            "stone_sword",
+            "iron_sword",
+        ]
+
+
+def inventory_slot_grid(obs: np.ndarray) -> Tuple[int, int, int, int]:
+    items = inventory_items()
+    view_cols = 9
+    rows = int(np.ceil(len(items) / view_cols))
+    inventory_rows = crafter_inventory_rows(size=obs.shape[:2])
+    slot_w = obs.shape[1] // view_cols
+    slot_h = max((inventory_rows - 1) // rows, 1)
+    y_start = obs.shape[0] - inventory_rows + 1
+    return view_cols, rows, slot_w, slot_h, y_start
+
+
+def inventory_slot_bounds(obs: np.ndarray, slot_idx: int) -> Tuple[int, int, int, int]:
+    cols, rows, slot_w, slot_h, y_start = inventory_slot_grid(obs)
+    row = slot_idx // cols
+    col = slot_idx % cols
+    x0 = col * slot_w
+    x1 = min((col + 1) * slot_w, obs.shape[1])
+    y0 = y_start + row * slot_h
+    y1 = min(y_start + (row + 1) * slot_h, obs.shape[0])
+    return x0, x1, y0, y1
+
+
 def occlusion_fill(obs: np.ndarray, mode: str, rng: np.random.Generator) -> np.ndarray:
     inventory_rows = crafter_inventory_rows(size=obs.shape[:2])
     world = obs[:-inventory_rows]
@@ -80,6 +128,17 @@ def occlude_cell(
     return occluded
 
 
+def occlude_inventory_slot(obs: np.ndarray, slot_idx: int, mode: str, rng: np.random.Generator) -> np.ndarray:
+    occluded = obs.copy()
+    x0, x1, y0, y1 = inventory_slot_bounds(obs, slot_idx)
+    fill = occlusion_fill(obs, mode, rng)
+    if mode == "noise":
+        occluded[y0:y1, x0:x1] = rng.integers(0, 256, size=(y1 - y0, x1 - x0, 3), dtype=np.uint8)
+    else:
+        occluded[y0:y1, x0:x1] = fill
+    return occluded
+
+
 def world_cell_metadata(env, ix: int, iy: int) -> Dict[str, object]:
     grid = np.asarray(env._local_view._grid, dtype=np.int64)
     center_index = grid // 2
@@ -88,8 +147,11 @@ def world_cell_metadata(env, ix: int, iy: int) -> Dict[str, object]:
     pos = center_world + delta
     material, obj = env._world[tuple(pos)]
     return {
+        "region": "world",
         "cell_ix": ix,
         "cell_iy": iy,
+        "inventory_slot": None,
+        "inventory_item": None,
         "delta_x": int(delta[0]),
         "delta_y": int(delta[1]),
         "world_x": int(pos[0]),
@@ -97,6 +159,26 @@ def world_cell_metadata(env, ix: int, iy: int) -> Dict[str, object]:
         "material": material,
         "object": None if obj is None else type(obj).__name__,
         "is_player_cell": bool(obj is env._player),
+    }
+
+
+def inventory_slot_metadata(slot_idx: int, item_name: str) -> Dict[str, object]:
+    cols = 9
+    return {
+        "region": "inventory",
+        "cell_ix": None,
+        "cell_iy": None,
+        "inventory_slot": slot_idx,
+        "inventory_item": item_name,
+        "delta_x": None,
+        "delta_y": None,
+        "world_x": None,
+        "world_y": None,
+        "material": None,
+        "object": None,
+        "is_player_cell": False,
+        "inventory_col": slot_idx % cols,
+        "inventory_row": slot_idx // cols,
     }
 
 
@@ -177,9 +259,12 @@ def score_cell_occlusions(
     device,
     occlusion_mode: str,
     rng: np.random.Generator,
-) -> Tuple[np.ndarray, List[Dict[str, object]]]:
+) -> Tuple[np.ndarray, np.ndarray, List[Dict[str, object]]]:
     grid_shape = visible_grid_shape(candidate.env)
     deltas = np.zeros((grid_shape[1], grid_shape[0]), dtype=np.float32)
+    items = inventory_items()
+    inventory_cols, inventory_rows, _, _, _ = inventory_slot_grid(candidate.obs)
+    inventory_deltas = np.full((inventory_rows, inventory_cols), np.nan, dtype=np.float32)
     rows: List[Dict[str, object]] = []
     for iy in range(grid_shape[1]):
         for ix in range(grid_shape[0]):
@@ -203,7 +288,30 @@ def score_cell_occlusions(
             }
             row.update(world_cell_metadata(candidate.env, ix, iy))
             rows.append(row)
-    return deltas, rows
+    for slot_idx, item_name in enumerate(items):
+        occluded = occlude_inventory_slot(candidate.obs, slot_idx, occlusion_mode, rng)
+        value = score_observation(
+            model,
+            occluded,
+            device,
+            candidate.states,
+            candidate.rnn_states,
+        )["value"]
+        delta = value - candidate.base_value
+        slot_row = slot_idx // inventory_cols
+        slot_col = slot_idx % inventory_cols
+        inventory_deltas[slot_row, slot_col] = delta
+        row = {
+            "episode_id": candidate.episode_id,
+            "step_id": candidate.step_id,
+            "base_value": candidate.base_value,
+            "occluded_value": value,
+            "delta": delta,
+            "abs_delta": abs(delta),
+        }
+        row.update(inventory_slot_metadata(slot_idx, item_name))
+        rows.append(row)
+    return deltas, inventory_deltas, rows
 
 
 def draw_grid(ax, obs: np.ndarray, grid_shape: Tuple[int, int]):
@@ -220,7 +328,17 @@ def draw_grid(ax, obs: np.ndarray, grid_shape: Tuple[int, int]):
         ax.plot([0, grid_shape[0] * cell_w], [y, y], color="white", linewidth=0.45, alpha=0.7)
 
 
-def save_heatmap(candidate: CandidateState, deltas: np.ndarray, output_path: str, title: str):
+def draw_inventory_grid(ax, obs: np.ndarray):
+    cols, rows, slot_w, slot_h, y_start = inventory_slot_grid(obs)
+    for col in range(cols + 1):
+        x = col * slot_w
+        ax.plot([x, x], [y_start, min(y_start + rows * slot_h, obs.shape[0])], color="white", linewidth=0.45, alpha=0.7)
+    for row in range(rows + 1):
+        y = y_start + row * slot_h
+        ax.plot([0, cols * slot_w], [y, y], color="white", linewidth=0.45, alpha=0.7)
+
+
+def save_heatmap(candidate: CandidateState, deltas: np.ndarray, inventory_deltas: np.ndarray, output_path: str, title: str):
     grid_shape = visible_grid_shape(candidate.env)
     inventory_rows = crafter_inventory_rows(size=candidate.obs.shape[:2])
     world_h = candidate.obs.shape[0] - inventory_rows
@@ -234,18 +352,20 @@ def save_heatmap(candidate: CandidateState, deltas: np.ndarray, output_path: str
         mode="edge",
     )[:world_h, :world_w]
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4), constrained_layout=True)
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4), constrained_layout=True)
     axes[0].imshow(candidate.obs)
     axes[0].set_title(f"Original\nV={candidate.base_value:.3f}")
     axes[0].axis("off")
     draw_grid(axes[0], candidate.obs, grid_shape)
+    draw_inventory_grid(axes[0], candidate.obs)
 
     vmax = max(float(np.max(np.abs(deltas))), 1e-6)
-    im = axes[1].imshow(candidate.obs)
+    axes[1].imshow(candidate.obs)
     axes[1].imshow(heatmap, cmap="coolwarm", alpha=0.62, vmin=-vmax, vmax=vmax)
     axes[1].set_title(title)
     axes[1].axis("off")
     draw_grid(axes[1], candidate.obs, grid_shape)
+    draw_inventory_grid(axes[1], candidate.obs)
 
     cell_im = axes[2].imshow(deltas, cmap="coolwarm", vmin=-vmax, vmax=vmax)
     axes[2].set_title("Cell delta\nV(occluded) - V(base)")
@@ -257,6 +377,22 @@ def save_heatmap(candidate: CandidateState, deltas: np.ndarray, output_path: str
         for ix in range(grid_shape[0]):
             axes[2].text(ix, iy, f"{deltas[iy, ix]:.2f}", ha="center", va="center", fontsize=6)
     fig.colorbar(cell_im, ax=axes[2], shrink=0.8)
+
+    inv_vmax = max(float(np.nanmax(np.abs(inventory_deltas))), 1e-6)
+    inv_im = axes[3].imshow(inventory_deltas, cmap="coolwarm", vmin=-inv_vmax, vmax=inv_vmax)
+    axes[3].set_title("Inventory delta\nV(occluded) - V(base)")
+    axes[3].set_xlabel("inventory x")
+    axes[3].set_ylabel("inventory y")
+    items = inventory_items()
+    for slot_idx, item_name in enumerate(items):
+        row = slot_idx // inventory_deltas.shape[1]
+        col = slot_idx % inventory_deltas.shape[1]
+        if row >= inventory_deltas.shape[0]:
+            continue
+        label = item_name.replace("_", "\n")
+        axes[3].text(col, row - 0.23, label, ha="center", va="center", fontsize=5)
+        axes[3].text(col, row + 0.23, f"{inventory_deltas[row, col]:.2f}", ha="center", va="center", fontsize=6)
+    fig.colorbar(inv_im, ax=axes[3], shrink=0.8)
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
 
@@ -308,16 +444,18 @@ def main():
     summary_rows = []
     for rank, candidate in enumerate(candidates, start=1):
         stem = f"rank{rank:03d}-ep{candidate.episode_id:03d}-step{candidate.step_id:04d}"
-        deltas, rows = score_cell_occlusions(candidate, model, device, args.occlusion_mode, rng)
+        deltas, inventory_deltas, rows = score_cell_occlusions(candidate, model, device, args.occlusion_mode, rng)
         all_rows.extend(rows)
         heatmap_path = os.path.join(args.output_dir, f"{stem}-cell-occlusion.png")
         save_heatmap(
             candidate,
             deltas,
+            inventory_deltas,
             heatmap_path,
             title=f"{args.occlusion_mode} occlusion\nrank {rank}, ep {candidate.episode_id}, step {candidate.step_id}",
         )
         np.save(os.path.join(args.output_dir, f"{stem}-deltas.npy"), deltas)
+        np.save(os.path.join(args.output_dir, f"{stem}-inventory-deltas.npy"), inventory_deltas)
         summary_rows.append(
             {
                 "rank": rank,
@@ -326,6 +464,8 @@ def main():
                 "base_value": candidate.base_value,
                 "mean_abs_delta": float(np.mean(np.abs(deltas))),
                 "max_abs_delta": float(np.max(np.abs(deltas))),
+                "inventory_mean_abs_delta": float(np.nanmean(np.abs(inventory_deltas))),
+                "inventory_max_abs_delta": float(np.nanmax(np.abs(inventory_deltas))),
                 "min_delta": float(np.min(deltas)),
                 "max_delta": float(np.max(deltas)),
                 "heatmap_path": heatmap_path,
