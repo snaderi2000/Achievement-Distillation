@@ -12,6 +12,8 @@ def sample_rollouts(
     storage: RolloutStorage,
     progress_bonus_beta: float = 0.0,
     death_penalty: float = 0.0,
+    value_aug_active: bool = False,
+    value_aug_modes: tuple[str, ...] = ("horizontal", "vertical", "both"),
 ) -> Dict[str, np.ndarray]:
     # Set model to eval model
     model.eval()
@@ -26,6 +28,13 @@ def sample_rollouts(
 
 
     for step in range(storage.nstep):
+        if value_aug_active and storage.value_aug_obs is not None:
+            mode = value_aug_modes[int(np.random.randint(len(value_aug_modes)))]
+            flipped_obs = np.stack(venv.env_method("render_semantic_flip", mode), axis=0)
+            flipped_obs = venv.transform_obs(flipped_obs)
+        else:
+            flipped_obs = None
+
         # Pass through model
         inputs = storage.get_inputs(step)
         outputs = model.act(**inputs)
@@ -72,6 +81,7 @@ def sample_rollouts(
         outputs["masks"] = 1.0 - dones
         outputs["successes"] = infos["successes"]
         outputs["episode_lengths"] = infos["episode_lengths"]
+        outputs["value_aug_obs"] = flipped_obs
         intrinsic_reward_sums.append((intrinsic_rewards + death_rewards).mean().item())
 
 

@@ -9,8 +9,8 @@ import numpy as np
 import torch as th
 
 from collect_value_map import load_model, set_seed
+from achievement_distillation.semantic_flip import apply_flip_visible_world_state
 from counterfactual_env_editor import (
-    apply_flip_visible_world_state,
     get_hidsize,
     render_env,
     save_side_by_side,

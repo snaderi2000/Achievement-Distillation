@@ -48,6 +48,7 @@ class PPOAlgorithm(BaseAlgorithm):
         value_aug_modes_per_batch: int = 1,
         value_aug_inventory_rows: int = 15,
         value_aug_detach_target: bool = True,
+        value_aug_source: str = "pixel",
     ):
         super().__init__(model)
         self.model: PPOModel
@@ -86,6 +87,7 @@ class PPOAlgorithm(BaseAlgorithm):
         self.value_aug_modes_per_batch = int(value_aug_modes_per_batch)
         self.value_aug_inventory_rows = int(value_aug_inventory_rows)
         self.value_aug_detach_target = bool(value_aug_detach_target)
+        self.value_aug_source = value_aug_source
         self.num_env_steps = 0
 
         # Optimizer
@@ -125,7 +127,8 @@ class PPOAlgorithm(BaseAlgorithm):
         health_cf_loss_epoch = 0
         rank_loss_epoch = 0
         value_aug_loss_epoch = 0
-        value_aug_mode_loss_epoch = {mode: 0.0 for mode in self.value_aug_modes}
+        value_aug_loss_keys = ("semantic",) if self.value_aug_source == "semantic" else self.value_aug_modes
+        value_aug_mode_loss_epoch = {mode: 0.0 for mode in value_aug_loss_keys}
         extra_stat_sums = {}
         nupdate = 0
         value_aug_active = self._value_aug_active(storage)
@@ -229,7 +232,7 @@ class PPOAlgorithm(BaseAlgorithm):
                 health_cf_loss_epoch += health_cf_loss.item()
                 rank_loss_epoch += rank_loss.item()
                 value_aug_loss_epoch += value_aug_loss.item()
-                for mode in self.value_aug_modes:
+                for mode in value_aug_loss_keys:
                     mode_loss = value_aug_mode_losses.get(mode)
                     if mode_loss is not None:
                         value_aug_mode_loss_epoch[mode] += mode_loss.detach().item()
@@ -393,14 +396,23 @@ class PPOAlgorithm(BaseAlgorithm):
         mode_losses = {}
         selected_modes = self._select_value_aug_modes()
         aug_loss = target_vpreds.new_zeros(())
-        for mode in selected_modes:
-            flipped_obs = self._flip_obs_world(batch["obs"], mode)
-            flipped_outputs = self.model.forward(flipped_obs, **forward_kwargs)
-            mode_loss = F.mse_loss(flipped_outputs["vpreds"], target_vpreds)
-            mode_losses[mode] = mode_loss
-            aug_loss = aug_loss + mode_loss
-        if selected_modes:
-            aug_loss = aug_loss / len(selected_modes)
+        if self.value_aug_source == "semantic":
+            if "value_aug_obs" not in batch:
+                raise RuntimeError("value_aug_source='semantic' requires RolloutStorage value_aug_obs.")
+            flipped_outputs = self.model.forward(batch["value_aug_obs"], **forward_kwargs)
+            aug_loss = F.mse_loss(flipped_outputs["vpreds"], target_vpreds)
+            mode_losses["semantic"] = aug_loss
+        elif self.value_aug_source == "pixel":
+            for mode in selected_modes:
+                flipped_obs = self._flip_obs_world(batch["obs"], mode)
+                flipped_outputs = self.model.forward(flipped_obs, **forward_kwargs)
+                mode_loss = F.mse_loss(flipped_outputs["vpreds"], target_vpreds)
+                mode_losses[mode] = mode_loss
+                aug_loss = aug_loss + mode_loss
+            if selected_modes:
+                aug_loss = aug_loss / len(selected_modes)
+        else:
+            raise ValueError("value_aug_source must be 'pixel' or 'semantic'.")
         return aug_loss, mode_losses
 
     def _select_value_aug_modes(self) -> tuple[str, ...]:

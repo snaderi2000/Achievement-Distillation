@@ -19,8 +19,16 @@ from achievement_distillation.constant import TASKS
 from achievement_distillation.logger import Logger
 from achievement_distillation.model import *
 from achievement_distillation.sample import sample_rollouts
+from achievement_distillation.semantic_flip import SemanticFlipEnv
 from achievement_distillation.storage import RolloutStorage
 from achievement_distillation.wrapper import VecPyTorch
+
+
+def make_env(seed: int, use_semantic_value_aug: bool = False):
+    env = Env(seed=seed)
+    if use_semantic_value_aug:
+        env = SemanticFlipEnv(env)
+    return env
 
 
 def main(args):
@@ -58,7 +66,9 @@ def main(args):
 
     # Create environment
     seeds = np.random.randint(0, 2**31 - 1, size=config["nproc"])
-    env_fns = [partial(Env, seed=seed) for seed in seeds]
+    algorithm_kwargs = config.get("algorithm_kwargs", {})
+    use_semantic_value_aug = algorithm_kwargs.get("value_aug_source") == "semantic"
+    env_fns = [partial(make_env, seed=int(seed), use_semantic_value_aug=use_semantic_value_aug) for seed in seeds]
 
     try:
         venv = SubprocVecEnv(env_fns, start_method="forkserver")
@@ -85,6 +95,7 @@ def main(args):
         hidsize=config["model_kwargs"]["hidsize"],
         rnn_hidsize=config["model_kwargs"].get("rnn_hidsize"),
         device=device,
+        store_value_aug_obs=use_semantic_value_aug,
     )
     storage.obs[0].copy_(obs)
 
@@ -133,6 +144,8 @@ def main(args):
             storage,
             progress_bonus_beta=config.get("progress_bonus_beta", 0.0),
             death_penalty=config.get("death_penalty", 0.0),
+            value_aug_active=use_semantic_value_aug and algorithm._value_aug_active(storage),
+            value_aug_modes=getattr(algorithm, "value_aug_modes", ("horizontal", "vertical", "both")),
         )
 
         # Compute returns

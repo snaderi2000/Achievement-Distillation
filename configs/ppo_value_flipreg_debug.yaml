@@ -29,9 +29,10 @@ algorithm_kwargs:
   ent_coef: 0.01
   lr: 3.0e-4
   max_grad_norm: 0.5
-  value_aug_coef: 0.02
+  value_aug_coef: 0.05
   value_aug_start_step: 10000
   value_aug_modes: ["horizontal", "vertical", "both"]
   value_aug_modes_per_batch: 1
   value_aug_inventory_rows: 15
   value_aug_detach_target: true
+  value_aug_source: semantic

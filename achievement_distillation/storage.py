@@ -22,12 +22,14 @@ class RolloutStorage:
         hidsize: int,
         rnn_hidsize: int | None,
         device: th.device,
+        store_value_aug_obs: bool = False,
     ):
         # Params
         self.nstep = nstep
         self.nproc = nproc
         self.device = device
         self.rnn_hidsize = hidsize if rnn_hidsize is None else rnn_hidsize
+        self.store_value_aug_obs = store_value_aug_obs
 
         # Get obs shape and action dim
         assert isinstance(observation_space, spaces.Box)
@@ -37,6 +39,7 @@ class RolloutStorage:
 
         # Tensors
         self.obs = th.zeros(nstep + 1, nproc, *obs_shape, device=device)
+        self.value_aug_obs = th.zeros(nstep, nproc, *obs_shape, device=device) if store_value_aug_obs else None
         self.actions = th.zeros(nstep, nproc, *action_shape, device=device).long()
         self.rewards = th.zeros(nstep, nproc, 1, device=device)
         self.achievement_rewards = th.zeros(nstep, nproc, 1, device=device)
@@ -87,6 +90,7 @@ class RolloutStorage:
         vitals: Optional[th.Tensor] = None,
         episode_lengths: Optional[th.Tensor] = None,
         next_rnn_states: Optional[th.Tensor] = None,
+        value_aug_obs: Optional[th.Tensor] = None,
         **kwargs,
     ):
         # Get prev successes, timesteps, and states
@@ -129,6 +133,11 @@ class RolloutStorage:
     
         # Update tensors
         self.obs[self.step + 1].copy_(obs)
+        if self.value_aug_obs is not None:
+            if value_aug_obs is None:
+                self.value_aug_obs[self.step].zero_()
+            else:
+                self.value_aug_obs[self.step].copy_(value_aug_obs)
         self.actions[self.step].copy_(actions)
         self.rewards[self.step].copy_(rewards)
         self.achievement_rewards[self.step].copy_(achievement_rewards)
@@ -170,6 +179,8 @@ class RolloutStorage:
         self.achievement_returns.zero_()
         self.health_returns.zero_()
         self.survival_returns.zero_()
+        if self.value_aug_obs is not None:
+            self.value_aug_obs.zero_()
         # Reset step
         self.step = 0
 
@@ -345,6 +356,9 @@ class RolloutStorage:
 
         # Sample batch
         obs = self.obs[:-1].view(-1, *self.obs.shape[2:])
+        value_aug_obs = None
+        if self.value_aug_obs is not None:
+            value_aug_obs = self.value_aug_obs.view(-1, *self.value_aug_obs.shape[2:])
         states = self.states[:-1].view(-1, *self.states.shape[2:])
         rnn_states = self.rnn_states[:-1].view(-1, *self.rnn_states.shape[2:])
         actions = self.actions.view(-1, *self.actions.shape[2:])
@@ -396,6 +410,8 @@ class RolloutStorage:
                 "death_event_mask": death_event_mask[indices],
                 "health_values": health_values[indices],
             }
+            if value_aug_obs is not None:
+                batch["value_aug_obs"] = value_aug_obs[indices]
             yield batch
 
     def get_recurrent_data_loader(self, nbatch: int) -> Iterator[Dict[str, th.Tensor]]:
