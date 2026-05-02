@@ -344,21 +344,23 @@ def draw_grid(ax, obs: np.ndarray, grid_shape: Tuple[int, int]):
     world_w = cell_w * grid_shape[0]
     world_h = cell_h * grid_shape[1]
     for ix in range(grid_shape[0] + 1):
-        x = ix * cell_w
-        ax.plot([x, x], [0, world_h], color="white", linewidth=0.45, alpha=0.7)
+        x = ix * cell_w - 0.5
+        ax.plot([x, x], [-0.5, world_h - 0.5], color="white", linewidth=0.45, alpha=0.7)
     for iy in range(grid_shape[1] + 1):
-        y = iy * cell_h
-        ax.plot([0, grid_shape[0] * cell_w], [y, y], color="white", linewidth=0.45, alpha=0.7)
+        y = iy * cell_h - 0.5
+        ax.plot([-0.5, world_w - 0.5], [y, y], color="white", linewidth=0.45, alpha=0.7)
 
 
 def draw_inventory_grid(ax, obs: np.ndarray):
     cols, rows, slot_w, slot_h, y_start = inventory_slot_grid(obs)
+    y_end = min(y_start + rows * slot_h, obs.shape[0])
+    x_end = min(cols * slot_w, obs.shape[1])
     for col in range(cols + 1):
-        x = col * slot_w
-        ax.plot([x, x], [y_start, min(y_start + rows * slot_h, obs.shape[0])], color="white", linewidth=0.45, alpha=0.7)
+        x = col * slot_w - 0.5
+        ax.plot([x, x], [y_start - 0.5, y_end - 0.5], color="white", linewidth=0.45, alpha=0.7)
     for row in range(rows + 1):
-        y = y_start + row * slot_h
-        ax.plot([0, cols * slot_w], [y, y], color="white", linewidth=0.45, alpha=0.7)
+        y = y_start + row * slot_h - 0.5
+        ax.plot([-0.5, x_end - 0.5], [y, y], color="white", linewidth=0.45, alpha=0.7)
 
 
 def save_heatmap(candidate: CandidateState, deltas: np.ndarray, inventory_deltas: np.ndarray, output_path: str, title: str):
@@ -389,6 +391,8 @@ def save_heatmap(candidate: CandidateState, deltas: np.ndarray, inventory_deltas
     im = ax.imshow(masked_heatmap, cmap="coolwarm", alpha=0.62, vmin=-vmax, vmax=vmax)
     ax.set_title(f"{title}\nV={candidate.base_value:.3f}")
     ax.axis("off")
+    ax.set_xlim(-0.5, candidate.obs.shape[1] - 0.5)
+    ax.set_ylim(candidate.obs.shape[0] - 0.5, -0.5)
     draw_grid(ax, candidate.obs, grid_shape)
     draw_inventory_grid(ax, candidate.obs)
     fig.colorbar(im, ax=ax, shrink=0.78, label="V(occluded) - V(base)")
