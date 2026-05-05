@@ -115,11 +115,20 @@ def sample_rollouts(
     # Update storage
     storage.vpreds[-1].copy_(vpreds)
 
-    # Stack stats
-    episode_lengths = np.stack(episode_lengths, axis=0).astype(np.int32)
-    episode_rewards = np.stack(episode_rewards, axis=0).astype(np.float32)
-    achievements = np.stack(achievements, axis=0).astype(np.int32)
-    successes = np.stack(successes, axis=0).astype(np.int32)
+    # Stack stats. Short recurrent rollouts may finish with zero completed
+    # episodes, especially early in training; keep the PPO rollout valid and
+    # return empty stats arrays for logging.
+    if episode_lengths:
+        episode_lengths = np.stack(episode_lengths, axis=0).astype(np.int32)
+        episode_rewards = np.stack(episode_rewards, axis=0).astype(np.float32)
+        achievements = np.stack(achievements, axis=0).astype(np.int32)
+        successes = np.stack(successes, axis=0).astype(np.int32)
+    else:
+        num_tasks = infos["successes"].shape[-1]
+        episode_lengths = np.empty((0,), dtype=np.int32)
+        episode_rewards = np.empty((0,), dtype=np.float32)
+        achievements = np.empty((0, num_tasks), dtype=np.int32)
+        successes = np.empty((0, num_tasks), dtype=np.int32)
 
     # Define rollout stats
     rollout_stats = {

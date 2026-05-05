@@ -159,9 +159,15 @@ def main(args):
 
         # Compute score
         successes = rollout_stats["successes"]
-        total_successes = np.concatenate([total_successes, successes], axis=0)
-        current_success_rate = 100 * np.mean(successes, axis=0)
-        cumulative_success_rate = 100 * np.mean(total_successes, axis=0)
+        if len(successes):
+            total_successes = np.concatenate([total_successes, successes], axis=0)
+            current_success_rate = 100 * np.mean(successes, axis=0)
+        else:
+            current_success_rate = np.zeros(len(TASKS), dtype=np.float32)
+        if len(total_successes):
+            cumulative_success_rate = 100 * np.mean(total_successes, axis=0)
+        else:
+            cumulative_success_rate = np.zeros(len(TASKS), dtype=np.float32)
         score = np.exp(np.mean(np.log(1 + cumulative_success_rate))) - 1
         reward_mean = float(np.mean(cumulative_success_rate))
         episode_reward_mean = float(np.mean(rollout_stats["episode_rewards"])) if len(rollout_stats["episode_rewards"]) else 0.0
