@@ -168,14 +168,14 @@ def main(args):
             cumulative_success_rate = 100 * np.mean(total_successes, axis=0)
         else:
             cumulative_success_rate = np.zeros(len(TASKS), dtype=np.float32)
-        score = np.exp(np.mean(np.log(1 + cumulative_success_rate))) - 1
+        score = float(np.exp(np.mean(np.log(1 + cumulative_success_rate))) - 1)
         reward_mean = float(np.mean(cumulative_success_rate))
         episode_reward_mean = float(np.mean(rollout_stats["episode_rewards"])) if len(rollout_stats["episode_rewards"]) else 0.0
         length_mean = float(np.mean(rollout_stats["episode_lengths"])) if len(rollout_stats["episode_lengths"]) else 0.0
 
         # Get eval stats
         eval_stats = {
-            "success_rate": {k: v for k, v in zip(TASKS, cumulative_success_rate)},
+            "success_rate": {k: float(v) for k, v in zip(TASKS, cumulative_success_rate)},
             "score": score,
             "reward_mean": reward_mean,
             "episode_reward_mean": episode_reward_mean,
