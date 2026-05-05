@@ -1,7 +1,7 @@
 save_freq: 50
 
-nstep: 96
-nproc: 8
+nstep: 384
+nproc: 16
 nepoch: 250
 gamma: 0.925
 gae_lambda: 0.625
@@ -26,11 +26,11 @@ model_kwargs:
 algorithm_cls: PPOAlgorithm
 algorithm_kwargs:
   ppo_nepoch: 4
-  ppo_nbatch: 8
+  ppo_nbatch: 16
   clip_param: 0.2
   vf_loss_coef: 1.0
   ent_coef: 0.01
   lr: 4.5e-4
   max_grad_norm: 0.5
-  grad_accum_steps: 2
+  grad_accum_steps: 4
   use_amp: True
