@@ -427,6 +427,7 @@ class RolloutStorage:
         advs = self.advs
         masks = self.masks[1:]
         init_rnn_states = self.rnn_states[0]
+        achievement_progress = self.successes[:-1].float()
 
         for env_indices in sampler:
             env_indices = th.tensor(env_indices, device=self.device, dtype=th.long)
@@ -438,6 +439,7 @@ class RolloutStorage:
                 "advs": advs[:, env_indices],
                 "masks": masks[:, env_indices],
                 "init_rnn_states": init_rnn_states[env_indices],
+                "achievement_progress": achievement_progress[:, env_indices],
             }
             yield batch
 
