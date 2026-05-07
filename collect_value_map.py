@@ -256,6 +256,11 @@ def save_value_graph_viewer(
     task_names: Sequence[str] = dataset["task_names"]
     achievements = dataset["achievements"][selected_idx].cpu().numpy()
     successes = dataset["successes"][selected_idx].cpu().numpy()
+    achievement_progress_inputs = (
+        dataset["achievement_progress_inputs"][selected_idx].cpu().numpy()
+        if "achievement_progress_inputs" in dataset
+        else None
+    )
     full_episode_ids = dataset["episode_ids"].cpu().numpy()
     full_successes = dataset["successes"].cpu().numpy()
     full_first_unlocks = compute_first_unlocks(full_successes, full_episode_ids, task_names)
@@ -291,6 +296,14 @@ def save_value_graph_viewer(
                 "image_width": int(width),
                 "image_height": int(height),
                 "achieved_tasks": achieved,
+                "memory_tasks": None if achievement_progress_inputs is None else [
+                    task_names[task_idx]
+                    for task_idx, flag in enumerate(achievement_progress_inputs[idx].tolist())
+                    if int(flag) > 0
+                ],
+                "achievement_progress_input": None
+                if achievement_progress_inputs is None
+                else achievement_progress_inputs[idx].tolist(),
                 "new_achievements": full_first_unlocks[int(selected_idx[idx])],
                 "achievement_counts": achievements[idx].tolist(),
                 "latent_norm": float(latent_norms[idx]),
@@ -1262,6 +1275,7 @@ def collect_value_dataset(
     dones: List[bool] = []
     achievements: List[th.Tensor] = []
     success_flags: List[th.Tensor] = []
+    achievement_progress_inputs: List[th.Tensor] = []
     episode_ids: List[int] = []
     step_ids: List[int] = []
 
@@ -1290,6 +1304,11 @@ def collect_value_dataset(
                     act_kwargs["states"] = current_states
                 if current_rnn_states is not None:
                     act_kwargs["rnn_states"] = current_rnn_states
+                if (
+                    getattr(model, "use_achievement_progress_input", False)
+                    or hasattr(model, "achievement_progress_dim")
+                ):
+                    act_kwargs["achievement_progress"] = current_successes.float()
                 outputs = model.act(obs, **act_kwargs)
                 action = outputs["actions"]
                 value = outputs["vpreds"]
@@ -1325,6 +1344,7 @@ def collect_value_dataset(
             dones.append(bool(done_tensor.item()))
             achievements.append(infos["achievements"].squeeze(0).detach().cpu())
             success_flags.append(infos["successes"].squeeze(0).detach().cpu())
+            achievement_progress_inputs.append(current_successes.squeeze(0).detach().cpu())
             episode_ids.append(episode_idx)
             step_ids.append(step_idx)
 
@@ -1368,6 +1388,7 @@ def collect_value_dataset(
         "dones": th.tensor(dones, dtype=th.bool),
         "achievements": th.stack(achievements),
         "successes": th.stack(success_flags),
+        "achievement_progress_inputs": th.stack(achievement_progress_inputs),
         "episode_ids": th.tensor(episode_ids, dtype=th.long),
         "step_ids": th.tensor(step_ids, dtype=th.long),
         "task_names": TASKS,

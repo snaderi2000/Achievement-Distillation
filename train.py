@@ -1,4 +1,5 @@
 import argparse
+from collections import deque
 import datetime
 from functools import partial
 import json
@@ -135,6 +136,10 @@ def main(args):
 
     # Run algorithm
     total_successes = np.zeros((0, len(TASKS)), dtype=np.int32)
+    rollout_env_steps = config["nstep"] * config["nproc"]
+    episode_reward_window_steps = int(config.get("episode_reward_window_steps", 100_000))
+    recent_episode_rewards = deque()
+    total_env_steps = 0
 
     for epoch in range(1, config["nepoch"] + 1):
         # Sample episodes
@@ -147,6 +152,7 @@ def main(args):
             value_aug_active=use_semantic_value_aug and algorithm._value_aug_active(storage),
             value_aug_modes=getattr(algorithm, "value_aug_modes", ("horizontal", "vertical", "both")),
         )
+        total_env_steps += rollout_env_steps
 
         # Compute returns
         storage.compute_returns(config["gamma"], config["gae_lambda"])
@@ -171,6 +177,16 @@ def main(args):
         score = float(np.exp(np.mean(np.log(1 + cumulative_success_rate))) - 1)
         reward_mean = float(np.mean(cumulative_success_rate))
         episode_reward_mean = float(np.mean(rollout_stats["episode_rewards"])) if len(rollout_stats["episode_rewards"]) else 0.0
+        for episode_reward in rollout_stats["episode_rewards"]:
+            recent_episode_rewards.append((total_env_steps, float(episode_reward)))
+        window_start = total_env_steps - episode_reward_window_steps
+        while recent_episode_rewards and recent_episode_rewards[0][0] < window_start:
+            recent_episode_rewards.popleft()
+        episode_reward_mean_100k = (
+            float(np.mean([reward for _, reward in recent_episode_rewards]))
+            if recent_episode_rewards
+            else 0.0
+        )
         length_mean = float(np.mean(rollout_stats["episode_lengths"])) if len(rollout_stats["episode_lengths"]) else 0.0
 
         # Get eval stats
@@ -179,6 +195,7 @@ def main(args):
             "score": score,
             "reward_mean": reward_mean,
             "episode_reward_mean": episode_reward_mean,
+            "episode_reward_mean_100k": episode_reward_mean_100k,
             "length_mean": length_mean,
         }
 
