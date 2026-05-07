@@ -13,6 +13,7 @@ from achievement_distillation.constant import TASKS
 from collect_value_map import load_model, set_seed
 from counterfactual_env_editor import (
     apply_inventory_edits,
+    material_names,
     parse_inventory_assignments,
     parse_vec2,
     render_env,
@@ -21,7 +22,7 @@ from counterfactual_env_editor import (
 from probe_material_value_preference import (
     clear_visible_objects,
     make_visible_material,
-    set_target_material,
+    set_target_texture,
 )
 
 
@@ -76,7 +77,7 @@ def prepare_scene(
         inventory_overrides=inventory_overrides,
     )
     env._world.daylight = 1.0
-    set_target_material(env, target_delta, target_material)
+    set_target_texture(env, target_delta, target_material, set(material_names(env)))
     return render_env(env)
 
 
