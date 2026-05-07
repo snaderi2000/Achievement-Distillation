@@ -12,6 +12,7 @@ from achievement_distillation.constant import TASKS
 from collect_value_map import load_model, set_seed
 from counterfactual_env_editor import (
     apply_inventory_edits,
+    parse_inventory_assignments,
     parse_vec2,
     render_env,
     score_observation,
@@ -34,7 +35,11 @@ def memory_vector(task_names: Tuple[str, ...], device: th.device) -> th.Tensor:
     return th.tensor([values], dtype=th.float32, device=device)
 
 
-def prepare_inventory(env, keep_vitals_full: bool = True) -> Dict[str, int]:
+def prepare_inventory(
+    env,
+    keep_vitals_full: bool = True,
+    inventory_overrides: Dict[str, int] | None = None,
+) -> Dict[str, int]:
     inventory = getattr(env._player, "inventory", None)
     if inventory is None:
         raise RuntimeError("Crafter player inventory is unavailable.")
@@ -45,15 +50,30 @@ def prepare_inventory(env, keep_vitals_full: bool = True) -> Dict[str, int]:
         updates["food"] = 9
         updates["drink"] = 9
         updates["energy"] = 9
+    if inventory_overrides:
+        unknown = sorted(set(inventory_overrides) - set(inventory.keys()))
+        if unknown:
+            raise ValueError(f"Unknown inventory keys: {unknown}")
+        updates.update(inventory_overrides)
     edits_log = []
     apply_inventory_edits(env, updates, edits_log)
     return updates
 
 
-def prepare_scene(env, target_delta: Tuple[int, int], target_material: str, keep_vitals_full: bool):
+def prepare_scene(
+    env,
+    target_delta: Tuple[int, int],
+    target_material: str,
+    keep_vitals_full: bool,
+    inventory_overrides: Dict[str, int] | None,
+):
     clear_visible_objects(env)
     make_visible_material(env, "grass", keep_player_tile=True)
-    prepare_inventory(env, keep_vitals_full=keep_vitals_full)
+    prepare_inventory(
+        env,
+        keep_vitals_full=keep_vitals_full,
+        inventory_overrides=inventory_overrides,
+    )
     env._world.daylight = 1.0
     set_target_material(env, target_delta, target_material)
     return render_env(env)
@@ -130,6 +150,12 @@ def main():
         action="store_true",
         help="Only set health=9 and wood_pickaxe=1; leave food/drink/energy at 0.",
     )
+    parser.add_argument(
+        "--set_inventory",
+        type=str,
+        default=None,
+        help="Comma-separated item=value overrides applied after the default inventory, e.g. stone=1.",
+    )
     parser.add_argument("--output_dir", type=str, default="achievement_memory_stone_counterfactual")
     args = parser.parse_args()
 
@@ -146,6 +172,7 @@ def main():
     target_delta = parse_vec2(args.target_delta)
     memory_tasks = tuple(task.strip() for task in args.memory_tasks.split(",") if task.strip())
     achievement_progress = memory_vector(memory_tasks, device)
+    inventory_overrides = parse_inventory_assignments(args.set_inventory)
 
     from crafter.env import Env
 
@@ -155,8 +182,20 @@ def main():
     stone_env = copy.deepcopy(env)
 
     keep_vitals_full = not args.empty_vitals
-    baseline_obs = prepare_scene(baseline_env, target_delta, "grass", keep_vitals_full)
-    stone_obs = prepare_scene(stone_env, target_delta, "stone", keep_vitals_full)
+    baseline_obs = prepare_scene(
+        baseline_env,
+        target_delta,
+        "grass",
+        keep_vitals_full,
+        inventory_overrides,
+    )
+    stone_obs = prepare_scene(
+        stone_env,
+        target_delta,
+        "stone",
+        keep_vitals_full,
+        inventory_overrides,
+    )
     inventory_updates = dict(stone_env._player.inventory)
 
     baseline_scores = score_observation(
@@ -191,6 +230,7 @@ def main():
         "eval_seed": args.eval_seed,
         "target_delta": list(target_delta),
         "memory_tasks": list(memory_tasks),
+        "inventory_overrides": inventory_overrides,
         "inventory": inventory_updates,
         "baseline_value": baseline_scores["value"],
         "stone_value": stone_scores["value"],
