@@ -1,5 +1,6 @@
 import argparse
 import copy
+import csv
 import json
 import os
 from typing import Dict, Tuple
@@ -129,6 +130,79 @@ def save_figure(
     plt.close(fig)
 
 
+def save_sweep_figure(rows, output_path: str):
+    epochs = [row["ckpt_epoch"] for row in rows]
+    deltas = [row["delta_value"] for row in rows]
+    baseline_values = [row["baseline_value"] for row in rows]
+    stone_values = [row["stone_value"] for row in rows]
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.4, 3.8))
+    axes[0].axhline(0.0, color="black", linewidth=1, alpha=0.5)
+    axes[0].plot(epochs, deltas, marker="o", color="#444444")
+    axes[0].fill_between(epochs, 0.0, deltas, where=np.array(deltas) >= 0.0, color="#d95f02", alpha=0.18)
+    axes[0].fill_between(epochs, 0.0, deltas, where=np.array(deltas) < 0.0, color="#1b9e77", alpha=0.18)
+    axes[0].set_title("Stone preference")
+    axes[0].set_xlabel("checkpoint epoch")
+    axes[0].set_ylabel("V(stone) - V(grass)")
+
+    axes[1].plot(epochs, baseline_values, marker="o", label="grass", color="#7fbf7b")
+    axes[1].plot(epochs, stone_values, marker="o", label="stone", color="#777777")
+    axes[1].set_title("Predicted values")
+    axes[1].set_xlabel("checkpoint epoch")
+    axes[1].set_ylabel("V")
+    axes[1].legend(frameon=False)
+
+    fig.suptitle("Achievement-memory stone preference across checkpoints")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def score_pair_for_checkpoint(
+    exp_name: str,
+    timestamp: str,
+    train_seed: int,
+    ckpt_epoch: int,
+    device: th.device,
+    baseline_obs: np.ndarray,
+    stone_obs: np.ndarray,
+    achievement_progress: th.Tensor,
+):
+    model, _config, ckpt_path = load_model(
+        exp_name,
+        timestamp,
+        train_seed,
+        ckpt_epoch,
+        device,
+    )
+    baseline_scores = score_observation(
+        model,
+        baseline_obs,
+        device,
+        achievement_progress=achievement_progress,
+    )
+    stone_scores = score_observation(
+        model,
+        stone_obs,
+        device,
+        achievement_progress=achievement_progress,
+    )
+    return {
+        "checkpoint": ckpt_path,
+        "ckpt_epoch": ckpt_epoch,
+        "baseline_value": baseline_scores["value"],
+        "stone_value": stone_scores["value"],
+        "delta_value": stone_scores["value"] - baseline_scores["value"],
+    }
+
+
+def parse_epochs(text: str) -> Tuple[int, ...]:
+    epochs = tuple(int(part.strip()) for part in text.split(",") if part.strip())
+    if not epochs:
+        raise ValueError("--ckpt_epochs did not contain any epochs.")
+    return epochs
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Compare an achievement-memory agent's value for all-grass vs stone-in-front scenes."
@@ -137,6 +211,12 @@ def main():
     parser.add_argument("--timestamp", type=str, default="debug")
     parser.add_argument("--train_seed", type=int, default=0)
     parser.add_argument("--ckpt_epoch", type=int, default=250)
+    parser.add_argument(
+        "--ckpt_epochs",
+        type=str,
+        default=None,
+        help="Optional comma-separated checkpoint epochs to sweep, e.g. 50,100,150,200,250.",
+    )
     parser.add_argument("--eval_seed", type=int, default=67)
     parser.add_argument("--target_delta", type=str, default="0,1")
     parser.add_argument(
@@ -162,13 +242,6 @@ def main():
     set_seed(args.eval_seed)
     os.makedirs(args.output_dir, exist_ok=True)
     device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
-    model, config, ckpt_path = load_model(
-        args.exp_name,
-        args.timestamp,
-        args.train_seed,
-        args.ckpt_epoch,
-        device,
-    )
     target_delta = parse_vec2(args.target_delta)
     memory_tasks = tuple(task.strip() for task in args.memory_tasks.split(",") if task.strip())
     achievement_progress = memory_vector(memory_tasks, device)
@@ -198,27 +271,61 @@ def main():
     )
     inventory_updates = dict(stone_env._player.inventory)
 
-    baseline_scores = score_observation(
-        model,
-        baseline_obs,
-        device,
-        achievement_progress=achievement_progress,
-    )
-    stone_scores = score_observation(
-        model,
-        stone_obs,
-        device,
-        achievement_progress=achievement_progress,
-    )
+    epochs = parse_epochs(args.ckpt_epochs) if args.ckpt_epochs else (args.ckpt_epoch,)
+    rows = [
+        score_pair_for_checkpoint(
+            args.exp_name,
+            args.timestamp,
+            args.train_seed,
+            epoch,
+            device,
+            baseline_obs,
+            stone_obs,
+            achievement_progress,
+        )
+        for epoch in epochs
+    ]
 
+    if args.ckpt_epochs:
+        stem = f"{args.exp_name}-s{args.train_seed:02}-sweep"
+        figure_path = os.path.join(args.output_dir, f"{stem}.png")
+        csv_path = os.path.join(args.output_dir, f"{stem}.csv")
+        summary_path = os.path.join(args.output_dir, f"{stem}.json")
+        save_sweep_figure(rows, figure_path)
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["ckpt_epoch", "baseline_value", "stone_value", "delta_value", "checkpoint"],
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+        summary = {
+            "eval_seed": args.eval_seed,
+            "target_delta": list(target_delta),
+            "memory_tasks": list(memory_tasks),
+            "inventory_overrides": inventory_overrides,
+            "inventory": inventory_updates,
+            "rows": rows,
+            "figure_path": figure_path,
+            "csv_path": csv_path,
+        }
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(json.dumps(summary, indent=2), flush=True)
+        env.close()
+        baseline_env.close()
+        stone_env.close()
+        return
+
+    row = rows[0]
     stem = f"{args.exp_name}-s{args.train_seed:02}-e{args.ckpt_epoch:03}"
     figure_path = os.path.join(args.output_dir, f"{stem}.png")
     summary_path = os.path.join(args.output_dir, f"{stem}.json")
     save_figure(
         baseline_obs,
         stone_obs,
-        baseline_scores["value"],
-        stone_scores["value"],
+        row["baseline_value"],
+        row["stone_value"],
         memory_tasks,
         inventory_updates,
         target_delta,
@@ -226,15 +333,15 @@ def main():
     )
 
     summary = {
-        "checkpoint": ckpt_path,
         "eval_seed": args.eval_seed,
         "target_delta": list(target_delta),
         "memory_tasks": list(memory_tasks),
         "inventory_overrides": inventory_overrides,
         "inventory": inventory_updates,
-        "baseline_value": baseline_scores["value"],
-        "stone_value": stone_scores["value"],
-        "delta_value": stone_scores["value"] - baseline_scores["value"],
+        "checkpoint": row["checkpoint"],
+        "baseline_value": row["baseline_value"],
+        "stone_value": row["stone_value"],
+        "delta_value": row["delta_value"],
         "figure_path": figure_path,
     }
     with open(summary_path, "w") as f:
