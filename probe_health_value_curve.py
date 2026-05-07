@@ -54,24 +54,33 @@ def prepare_controlled_scene(
         set_target_texture(env, target_delta, target_texture, set(material_names(env)))
 
 
-def set_health(env, health: int):
-    env._player.health = int(health)
-    env._player.inventory["health"] = int(health)
+def set_inventory_item(env, item_name: str, value: int):
+    value = int(value)
+    if item_name not in env._player.inventory:
+        raise ValueError(f"Unknown inventory item '{item_name}'.")
+    env._player.inventory[item_name] = value
+    if item_name == "health":
+        env._player.health = value
 
 
-def score_health_curve(
+def score_inventory_curve(
     model,
     base_env,
     device: th.device,
+    sweep_item: str,
+    min_value: int,
+    max_value: int,
     achievement_progress: th.Tensor | None,
     states: th.Tensor | None,
     rnn_states: th.Tensor | None,
 ):
     rows = []
     images = {}
-    for health in range(1, 10):
+    mid_value = (min_value + max_value) // 2
+    example_values = {min_value, mid_value, max_value}
+    for value in range(min_value, max_value + 1):
         env = copy.deepcopy(base_env)
-        set_health(env, health)
+        set_inventory_item(env, sweep_item, value)
         obs = render_env(env)
         scores = score_observation(
             model,
@@ -82,7 +91,7 @@ def score_health_curve(
             achievement_progress=achievement_progress,
         )
         row = {
-            "health": health,
+            sweep_item: value,
             "value": scores["value"],
         }
         if "health_value" in scores:
@@ -90,39 +99,40 @@ def score_health_curve(
         if "achievement_value" in scores:
             row["achievement_value"] = scores["achievement_value"]
         rows.append(row)
-        if health in (1, 5, 9):
-            images[health] = obs
+        if value in example_values:
+            images[value] = obs
         env.close()
     return rows, images
 
 
-def save_figure(rows, images, memory_tasks, inventory_updates, output_path: str):
-    healths = [row["health"] for row in rows]
+def save_figure(rows, images, memory_tasks, inventory_updates, sweep_item: str, output_path: str):
+    xs = [row[sweep_item] for row in rows]
     values = [row["value"] for row in rows]
+    example_values = sorted(images)
 
     fig = plt.figure(figsize=(11.2, 5.2))
     gs = fig.add_gridspec(2, 3, height_ratios=[1.0, 1.35])
-    for idx, health in enumerate((1, 5, 9)):
+    for idx, value in enumerate(example_values):
         ax = fig.add_subplot(gs[0, idx])
-        ax.imshow(images[health])
-        ax.set_title(f"health={health}", fontsize=11)
+        ax.imshow(images[value])
+        ax.set_title(f"{sweep_item}={value}", fontsize=11)
         ax.axis("off")
 
     ax = fig.add_subplot(gs[1, :])
-    ax.plot(healths, values, marker="o", linewidth=2, color="#444444")
-    ax.set_xticks(healths)
-    ax.set_xlabel("rendered health")
+    ax.plot(xs, values, marker="o", linewidth=2, color="#444444")
+    ax.set_xticks(xs)
+    ax.set_xlabel(f"rendered {sweep_item}")
     ax.set_ylabel("predicted value V(obs)")
-    ax.set_title("Value as rendered health changes")
+    ax.set_title(f"Value as rendered {sweep_item} changes")
     ax.grid(True, alpha=0.25)
 
     memory_text = ", ".join(memory_tasks) if memory_tasks else "empty"
     inv_text = ", ".join(
         f"{name}={value}"
         for name, value in inventory_updates.items()
-        if value > 0 and name != "health"
+        if value > 0 and name != sweep_item
     )
-    fig.suptitle(f"Health counterfactual curve\nmemory: {memory_text}; inventory: {inv_text}", fontsize=13)
+    fig.suptitle(f"{sweep_item} counterfactual curve\nmemory: {memory_text}; inventory: {inv_text}", fontsize=13)
     fig.tight_layout()
     fig.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -138,7 +148,7 @@ def write_csv(path: str, rows):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Hold a Crafter scene fixed and sweep rendered health from 1 to 9.")
+    parser = argparse.ArgumentParser(description="Hold a Crafter scene fixed and sweep one rendered inventory item.")
     parser.add_argument("--exp_name", type=str, default="ppo_achievement_memory_strong_v100_all")
     parser.add_argument("--timestamp", type=str, default="debug")
     parser.add_argument("--train_seed", type=int, default=0)
@@ -153,9 +163,12 @@ def main():
     parser.add_argument(
         "--set_inventory",
         type=str,
-        default="food=9,drink=9,energy=9,wood_pickaxe=0",
-        help="Comma-separated inventory values held fixed while health is swept. Do not include health.",
+        default="health=9,food=9,drink=9,energy=9,wood_pickaxe=0",
+        help="Comma-separated inventory values held fixed while --sweep_item is varied.",
     )
+    parser.add_argument("--sweep_item", type=str, default="health")
+    parser.add_argument("--min_value", type=int, default=None)
+    parser.add_argument("--max_value", type=int, default=9)
     parser.add_argument("--background_material", type=str, default="grass")
     parser.add_argument("--target_texture", type=str, default=None)
     parser.add_argument("--target_delta", type=str, default="0,1")
@@ -191,7 +204,8 @@ def main():
     memory_tasks = tuple(task.strip() for task in args.memory_tasks.split(",") if task.strip())
     achievement_progress = memory_vector(memory_tasks, device)
     inventory_updates = parse_inventory_assignments(args.set_inventory)
-    inventory_updates["health"] = 9
+    min_value = 1 if args.min_value is None and args.sweep_item == "health" else (0 if args.min_value is None else args.min_value)
+    inventory_updates[args.sweep_item] = min_value
 
     states = None
     rnn_states = None
@@ -223,20 +237,23 @@ def main():
         edits_log = []
         apply_inventory_edits(base_env, inventory_updates, edits_log)
 
-    rows, images = score_health_curve(
+    rows, images = score_inventory_curve(
         model,
         base_env,
         device=device,
+        sweep_item=args.sweep_item,
+        min_value=min_value,
+        max_value=args.max_value,
         achievement_progress=achievement_progress,
         states=states,
         rnn_states=rnn_states,
     )
 
-    stem = f"{args.exp_name}-s{args.train_seed:02}-e{args.ckpt_epoch:03}-health_curve"
+    stem = f"{args.exp_name}-s{args.train_seed:02}-e{args.ckpt_epoch:03}-{args.sweep_item}_curve"
     figure_path = os.path.join(args.output_dir, f"{stem}.png")
     csv_path = os.path.join(args.output_dir, f"{stem}.csv")
     summary_path = os.path.join(args.output_dir, f"{stem}.json")
-    save_figure(rows, images, memory_tasks, inventory_updates, figure_path)
+    save_figure(rows, images, memory_tasks, inventory_updates, args.sweep_item, figure_path)
     write_csv(csv_path, rows)
 
     summary = {
@@ -245,6 +262,9 @@ def main():
         "episode_id": args.episode_id,
         "step_id": args.step_id,
         "memory_tasks": list(memory_tasks),
+        "sweep_item": args.sweep_item,
+        "min_value": min_value,
+        "max_value": args.max_value,
         "inventory": inventory_updates,
         "background_material": args.background_material,
         "target_texture": args.target_texture,
