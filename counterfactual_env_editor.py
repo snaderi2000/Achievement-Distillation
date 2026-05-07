@@ -9,6 +9,7 @@ import numpy as np
 import torch as th
 
 from collect_value_map import load_model, observation_to_uint8_hwc, set_seed
+from achievement_distillation.constant import TASKS
 
 
 def crafter_inventory_rows(size=(64, 64), view=(9, 9)) -> int:
@@ -38,6 +39,7 @@ class ReplayState:
     obs: np.ndarray
     states: th.Tensor
     rnn_states: Optional[th.Tensor]
+    achievement_progress: th.Tensor
     step_id: int
     episode_id: int
 
@@ -55,6 +57,17 @@ def parse_inventory_assignments(text: Optional[str]) -> Dict[str, int]:
         name, value = item.split("=", 1)
         assignments[name.strip()] = int(value.strip())
     return assignments
+
+
+def parse_achievement_memory_tasks(text: Optional[str], device: th.device) -> Optional[th.Tensor]:
+    if not text:
+        return None
+    task_names = tuple(task.strip() for task in text.split(",") if task.strip())
+    unknown = sorted(set(task_names) - set(TASKS))
+    if unknown:
+        raise ValueError(f"Unknown achievement memory tasks: {unknown}")
+    values = [1.0 if task in task_names else 0.0 for task in TASKS]
+    return th.tensor([values], dtype=th.float32, device=device)
 
 
 def parse_vec2(text: str) -> Tuple[int, int]:
@@ -130,6 +143,7 @@ def score_observation(
     device: th.device,
     states: Optional[th.Tensor] = None,
     rnn_states: Optional[th.Tensor] = None,
+    achievement_progress: Optional[th.Tensor] = None,
 ) -> Dict[str, float]:
     obs_tensor = obs_to_tensor(obs, device)
     kwargs = {}
@@ -137,6 +151,11 @@ def score_observation(
         kwargs["states"] = states
     if rnn_states is not None:
         kwargs["rnn_states"] = rnn_states
+    uses_achievement_progress = (
+        getattr(model, "use_achievement_progress_input", False) or hasattr(model, "achievement_progress_dim")
+    )
+    if achievement_progress is not None and uses_achievement_progress:
+        kwargs["achievement_progress"] = achievement_progress
     with th.no_grad():
         outputs = model.act(obs_tensor, **kwargs)
     result = {
@@ -175,6 +194,7 @@ def replay_to_step(
         rnn_states = None
         if rnn_hidsize is not None:
             rnn_states = th.zeros(1, int(rnn_hidsize), device=device)
+        achievement_progress = th.zeros(1, len(TASKS), device=device)
         step_idx = 0
 
         while True:
@@ -184,6 +204,7 @@ def replay_to_step(
                     obs=obs,
                     states=states.clone(),
                     rnn_states=None if rnn_states is None else rnn_states.clone(),
+                    achievement_progress=achievement_progress.clone(),
                     step_id=step_idx,
                     episode_id=episode_idx,
                 )
@@ -192,6 +213,8 @@ def replay_to_step(
             act_kwargs = {"states": states}
             if rnn_states is not None:
                 act_kwargs["rnn_states"] = rnn_states
+            if getattr(model, "use_achievement_progress_input", False) or hasattr(model, "achievement_progress_dim"):
+                act_kwargs["achievement_progress"] = achievement_progress
             with th.no_grad():
                 outputs = model.act(obs_tensor, **act_kwargs)
                 action = int(outputs["actions"].item())
@@ -200,7 +223,13 @@ def replay_to_step(
                 if "next_rnn_states" in outputs:
                     rnn_states = outputs["next_rnn_states"]
 
-            obs, _, done, _ = env.step(action)
+            obs, _, done, info = env.step(action)
+            achievements = info.get("achievements")
+            if achievements is not None:
+                achievement_progress = th.tensor(
+                    [[1.0 if achievements.get(task, 0) > 0 else 0.0 for task in TASKS]],
+                    device=device,
+                )
             step_idx += 1
             if done:
                 break
@@ -599,6 +628,15 @@ def main():
         default=None,
         help="Optional donor step whose recurrent state is used only for scoring.",
     )
+    parser.add_argument(
+        "--achievement_memory_tasks",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated achievement bits to force for explicit-memory models, "
+            "for example collect_wood,place_table,make_wood_pickaxe."
+        ),
+    )
 
     parser.add_argument("--set_health", type=int, default=None)
     parser.add_argument("--set_inventory", type=str, default=None, help="Comma-separated item=value assignments.")
@@ -722,6 +760,10 @@ def main():
     base_score_rnn_states = replay.rnn_states
     edited_score_states = replay.states
     edited_score_rnn_states = replay.rnn_states
+    score_achievement_progress = replay.achievement_progress
+    forced_achievement_progress = parse_achievement_memory_tasks(args.achievement_memory_tasks, device)
+    if forced_achievement_progress is not None:
+        score_achievement_progress = forced_achievement_progress
     donor_state = None
     if args.score_rnn_state_episode_id is not None or args.score_rnn_state_step_id is not None:
         if args.score_rnn_state_episode_id is None or args.score_rnn_state_step_id is None:
@@ -742,7 +784,14 @@ def main():
         edited_score_rnn_states = donor_state.rnn_states
 
     base_obs = replay.obs.copy()
-    base_scores = score_observation(score_model, base_obs, device, base_score_states, base_score_rnn_states)
+    base_scores = score_observation(
+        score_model,
+        base_obs,
+        device,
+        base_score_states,
+        base_score_rnn_states,
+        score_achievement_progress,
+    )
     base_orientation_report = (
         visible_object_orientation_report(replay.env) if args.print_visible_object_orientations else None
     )
@@ -793,7 +842,14 @@ def main():
     if args.print_visible_object_orientations:
         print("Visible object orientations after env-state edits:")
         print(json.dumps(edited_orientation_report, indent=2, default=str))
-    edited_scores = score_observation(score_model, edited_obs, device, edited_score_states, edited_score_rnn_states)
+    edited_scores = score_observation(
+        score_model,
+        edited_obs,
+        device,
+        edited_score_states,
+        edited_score_rnn_states,
+        score_achievement_progress,
+    )
 
     os.makedirs(args.output_dir, exist_ok=True)
     stem = f"{args.exp_name}-e{args.episode_id:03d}-s{args.step_id:04d}"
@@ -833,6 +889,12 @@ def main():
         },
         "player_pos_after": tuple(int(x) for x in replay.env._player.pos),
         "inventory_after": dict(replay.env._player.inventory),
+        "achievement_memory_tasks": (
+            [task for task, value in zip(TASKS, score_achievement_progress.squeeze(0).tolist()) if value > 0.5]
+            if score_achievement_progress is not None
+            else None
+        ),
+        "achievement_memory_forced": forced_achievement_progress is not None,
         "daylight_after": float(replay.env._world.daylight),
         "inventory_rows_for_obs_edits": None if inventory_rows is None else int(inventory_rows),
         "figure_path": figure_path,
