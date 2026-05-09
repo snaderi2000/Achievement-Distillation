@@ -54,12 +54,12 @@ def canonical_texture_name(texture: str) -> str:
     return SPAWN_ALIASES.get(texture, texture)
 
 
-def available_target_cells(env) -> List[Tuple[int, int]]:
+def available_target_cells(env) -> List[Tuple[Tuple[int, int], Tuple[int, int]]]:
     cells = []
-    for (dx, dy), _world_pos, _material, obj in visible_world_cells(env):
+    for cell_index, world_pos, _material, obj in visible_world_cells(env):
         if obj is env._player:
             continue
-        cells.append((dx, dy))
+        cells.append((cell_index, world_pos))
     return cells
 
 
@@ -79,23 +79,22 @@ def place_count_texture(env, texture: str, count: int, rng: np.random.Generator)
             f"Valid objects: {sorted(valid_objects)}."
         )
 
-    for dx, dy in chosen:
+    player_pos = np.asarray(env._player.pos, dtype=np.int64)
+    placed_cells = []
+    for cell_index, world_pos in chosen:
+        pos = tuple(world_pos)
+        placed_cells.append(tuple(int(v) for v in cell_index))
         if texture in valid_materials:
-            pos = None
-            for cell_delta, world_pos, _material, _obj in visible_world_cells(env):
-                if cell_delta == (dx, dy):
-                    pos = tuple(world_pos)
-                    break
-            if pos is None:
-                raise RuntimeError(f"Could not resolve visible cell {(dx, dy)}.")
-            material, obj = env._world[pos]
+            _material, obj = env._world[pos]
             if obj is not None and obj is not env._player:
                 env._world.remove(obj)
             env._world[pos] = texture
         else:
+            env._world[pos] = "grass"
+            rel = np.asarray(world_pos, dtype=np.int64) - player_pos
             edits_log = []
-            apply_spawn_object(env, [(dx, dy, texture)], edits_log)
-    return chosen
+            apply_spawn_object(env, [(int(rel[0]), int(rel[1]), texture)], edits_log)
+    return placed_cells
 
 
 def prepare_base_env(eval_seed: int, background_material: str, inventory_updates: Dict[str, int]):
