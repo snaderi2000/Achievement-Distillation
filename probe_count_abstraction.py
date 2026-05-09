@@ -142,6 +142,16 @@ def quantity_bin(count: int) -> int:
     return 2
 
 
+def coarse_quantity_bin(count: int) -> int:
+    if count == 0:
+        return 0
+    if count == 1:
+        return 1
+    if count <= 3:
+        return 2
+    return 3
+
+
 def fit_ridge_count_probe(x_train: np.ndarray, y_train: np.ndarray, ridge: float):
     mean = x_train.mean(axis=0, keepdims=True)
     std = x_train.std(axis=0, keepdims=True) + 1e-6
@@ -159,6 +169,69 @@ def predict_ridge_count(x: np.ndarray, weights: np.ndarray, mean: np.ndarray, st
     return x_aug @ weights
 
 
+class CountMLP(th.nn.Module):
+    def __init__(self, insize: int, hidden: int):
+        super().__init__()
+        self.net = th.nn.Sequential(
+            th.nn.Linear(insize, hidden),
+            th.nn.ReLU(),
+            th.nn.Linear(hidden, hidden),
+            th.nn.ReLU(),
+            th.nn.Linear(hidden, 1),
+        )
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        return self.net(x).squeeze(-1)
+
+
+def fit_mlp_count_probe(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_all: np.ndarray,
+    hidden: int,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    seed: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    mean = x_train.mean(axis=0, keepdims=True)
+    std = x_train.std(axis=0, keepdims=True) + 1e-6
+    x_train_std = ((x_train - mean) / std).astype(np.float32)
+    x_all_std = ((x_all - mean) / std).astype(np.float32)
+    y_train = y_train.astype(np.float32)
+
+    device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
+    generator = th.Generator(device="cpu")
+    generator.manual_seed(seed)
+    dataset = th.utils.data.TensorDataset(th.from_numpy(x_train_std), th.from_numpy(y_train))
+    loader = th.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        generator=generator,
+    )
+    model = CountMLP(x_train.shape[1], hidden).to(device)
+    opt = th.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    model.train()
+    for _epoch in range(epochs):
+        for xb, yb in loader:
+            xb = xb.to(device)
+            yb = yb.to(device)
+            pred = model(xb)
+            loss = th.nn.functional.mse_loss(pred, yb)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+
+    model.eval()
+    preds = []
+    with th.no_grad():
+        for start in range(0, len(x_all_std), 1024):
+            xb = th.from_numpy(x_all_std[start : start + 1024]).to(device)
+            preds.append(model(xb).detach().cpu().numpy())
+    return np.concatenate(preds, axis=0), mean, std
+
+
 def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     mae = float(np.mean(np.abs(y_true - y_pred)))
     rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
@@ -166,15 +239,26 @@ def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, floa
     r2 = float(1.0 - np.sum((y_true - y_pred) ** 2) / denom) if denom > 0 else float("nan")
     rounded = np.clip(np.rint(y_pred), np.min(y_true), np.max(y_true))
     exact_acc = float(np.mean(rounded == y_true))
+    within_1_acc = float(np.mean(np.abs(y_pred - y_true) <= 1.0))
     true_bins = np.array([quantity_bin(int(v)) for v in y_true])
     pred_bins = np.array([quantity_bin(int(v)) for v in rounded])
     bin_acc = float(np.mean(true_bins == pred_bins))
+    true_coarse = np.array([coarse_quantity_bin(int(v)) for v in y_true])
+    pred_coarse = np.array([coarse_quantity_bin(int(v)) for v in rounded])
+    coarse_acc = float(np.mean(true_coarse == pred_coarse))
+    if len(y_true) > 1 and np.std(y_true) > 0 and np.std(y_pred) > 0:
+        corr = float(np.corrcoef(y_true, y_pred)[0, 1])
+    else:
+        corr = float("nan")
     return {
         "mae": mae,
         "rmse": rmse,
         "r2": r2,
+        "pearson_corr": corr,
         "rounded_count_accuracy": exact_acc,
+        "within_1_count_accuracy": within_1_acc,
         "zero_one_many_accuracy": bin_acc,
+        "zero_one_low_high_accuracy": coarse_acc,
     }
 
 
@@ -282,7 +366,15 @@ def save_examples_montage(examples: Dict[Tuple[str, int], np.ndarray], textures:
     plt.close(fig)
 
 
-def save_plots(rows: Sequence[Dict], y_pred: np.ndarray, output_path: str):
+def save_plots(
+    rows: Sequence[Dict],
+    y_pred: np.ndarray,
+    probe_train_mask: np.ndarray,
+    in_domain_holdout_mask: np.ndarray,
+    texture_holdout_mask: np.ndarray,
+    probe_type: str,
+    output_path: str,
+):
     types = sorted(set(row["texture"] for row in rows))
     counts = sorted(set(int(row["count"]) for row in rows))
     fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.4))
@@ -301,12 +393,24 @@ def save_plots(rows: Sequence[Dict], y_pred: np.ndarray, output_path: str):
     axes[0].legend(frameon=False, fontsize=8)
 
     y_true = np.array([row["count"] for row in rows], dtype=np.float64)
-    train_mask = np.array([row["split"] == "train" for row in rows])
-    axes[1].scatter(y_true[train_mask], y_pred[train_mask], alpha=0.35, label="train", s=18)
-    axes[1].scatter(y_true[~train_mask], y_pred[~train_mask], alpha=0.7, label="held-out type", s=22)
+    axes[1].scatter(y_true[probe_train_mask], y_pred[probe_train_mask], alpha=0.35, label="probe train", s=18)
+    axes[1].scatter(
+        y_true[in_domain_holdout_mask],
+        y_pred[in_domain_holdout_mask],
+        alpha=0.65,
+        label="same texture holdout",
+        s=22,
+    )
+    axes[1].scatter(
+        y_true[texture_holdout_mask],
+        y_pred[texture_holdout_mask],
+        alpha=0.75,
+        label="held-out texture",
+        s=22,
+    )
     lo, hi = min(counts), max(counts)
     axes[1].plot([lo, hi], [lo, hi], color="black", linewidth=1, alpha=0.55)
-    axes[1].set_title("Linear count probe")
+    axes[1].set_title(f"{probe_type.upper()} count probe")
     axes[1].set_xlabel("true count")
     axes[1].set_ylabel("predicted count")
     axes[1].legend(frameon=False)
@@ -330,7 +434,13 @@ def main():
     parser.add_argument("--counts", type=str, default="0,1,2,3,4,5")
     parser.add_argument("--num_layouts", type=int, default=50)
     parser.add_argument("--feature_key", type=str, default="vf_latents")
+    parser.add_argument("--probe_type", choices=["ridge", "mlp"], default="ridge")
     parser.add_argument("--ridge", type=float, default=10.0)
+    parser.add_argument("--train_holdout_fraction", type=float, default=0.2)
+    parser.add_argument("--mlp_hidden", type=int, default=256)
+    parser.add_argument("--mlp_epochs", type=int, default=200)
+    parser.add_argument("--mlp_batch_size", type=int, default=256)
+    parser.add_argument("--mlp_lr", type=float, default=1e-3)
     parser.add_argument("--background_material", type=str, default="grass")
     parser.add_argument("--memory_tasks", type=str, default="")
     parser.add_argument(
@@ -404,17 +514,44 @@ def main():
     y = np.array([row["count"] for row in rows], dtype=np.float64)
     types = np.array([row["texture"] for row in rows])
     train_mask = np.array([row["split"] == "train" for row in rows])
+    if not 0.0 <= args.train_holdout_fraction < 1.0:
+        raise ValueError("--train_holdout_fraction must be in [0, 1).")
+    train_cutoff = int(round(args.num_layouts * (1.0 - args.train_holdout_fraction)))
+    train_cutoff = min(max(train_cutoff, 1), args.num_layouts)
+    layout_ids = np.array([row["layout_id"] for row in rows], dtype=np.int64)
+    probe_train_mask = train_mask & (layout_ids < train_cutoff)
+    in_domain_holdout_mask = train_mask & (layout_ids >= train_cutoff)
+    texture_holdout_mask = ~train_mask
 
-    weights, mean, std = fit_ridge_count_probe(features[train_mask], y[train_mask], args.ridge)
-    y_pred = predict_ridge_count(features, weights, mean, std)
+    if args.probe_type == "ridge":
+        weights, mean, std = fit_ridge_count_probe(features[probe_train_mask], y[probe_train_mask], args.ridge)
+        y_pred = predict_ridge_count(features, weights, mean, std)
+    else:
+        y_pred, mean, std = fit_mlp_count_probe(
+            features[probe_train_mask],
+            y[probe_train_mask],
+            features,
+            hidden=args.mlp_hidden,
+            epochs=args.mlp_epochs,
+            batch_size=args.mlp_batch_size,
+            lr=args.mlp_lr,
+            seed=args.eval_seed,
+        )
+
     for row, pred in zip(rows, y_pred):
         row["predicted_count"] = float(pred)
         rounded = int(np.clip(np.rint(pred), min(counts), max(counts)))
         row["predicted_count_rounded"] = int(rounded)
         row["predicted_quantity_bin"] = quantity_bin(rounded)
+        row["predicted_coarse_quantity_bin"] = coarse_quantity_bin(rounded)
 
-    train_metrics = regression_metrics(y[train_mask], y_pred[train_mask])
-    test_metrics = regression_metrics(y[~train_mask], y_pred[~train_mask])
+    train_metrics = regression_metrics(y[probe_train_mask], y_pred[probe_train_mask])
+    in_domain_holdout_metrics = (
+        regression_metrics(y[in_domain_holdout_mask], y_pred[in_domain_holdout_mask])
+        if np.any(in_domain_holdout_mask)
+        else {}
+    )
+    test_metrics = regression_metrics(y[texture_holdout_mask], y_pred[texture_holdout_mask])
     distance_metrics = distance_diagnostic(
         (features - mean) / std,
         y.astype(np.int64),
@@ -425,7 +562,7 @@ def main():
     standardized_features = (features - mean) / std
     centroid_distances = centroid_distance_rows(standardized_features, rows)
 
-    stem = f"{args.exp_name}-s{args.train_seed:02}-e{args.ckpt_epoch:03}-{args.feature_key}-count"
+    stem = f"{args.exp_name}-s{args.train_seed:02}-e{args.ckpt_epoch:03}-{args.feature_key}-{args.probe_type}-count"
     csv_path = os.path.join(args.output_dir, f"{stem}.csv")
     centroid_csv_path = os.path.join(args.output_dir, f"{stem}-centroid_distances.csv")
     json_path = os.path.join(args.output_dir, f"{stem}.json")
@@ -447,10 +584,12 @@ def main():
         counts=y,
         predicted_counts=y_pred,
         textures=types,
-        train_mask=train_mask,
+        probe_train_mask=probe_train_mask,
+        in_domain_holdout_mask=in_domain_holdout_mask,
+        texture_holdout_mask=texture_holdout_mask,
         feature_key=args.feature_key,
     )
-    save_plots(rows, y_pred, plot_path)
+    save_plots(rows, y_pred, probe_train_mask, in_domain_holdout_mask, texture_holdout_mask, args.probe_type, plot_path)
     save_examples_montage(obs_examples, textures, args.example_count, examples_path)
 
     summary = {
@@ -460,10 +599,18 @@ def main():
         "test_textures": list(test_textures),
         "counts": list(counts),
         "num_layouts": args.num_layouts,
+        "probe_type": args.probe_type,
+        "train_holdout_fraction": args.train_holdout_fraction,
+        "probe_train_samples": int(probe_train_mask.sum()),
+        "in_domain_holdout_samples": int(in_domain_holdout_mask.sum()),
+        "heldout_texture_samples": int(texture_holdout_mask.sum()),
         "memory_tasks": list(memory_tasks),
         "inventory": inventory_updates,
         "ridge": args.ridge,
+        "mlp_hidden": args.mlp_hidden if args.probe_type == "mlp" else None,
+        "mlp_epochs": args.mlp_epochs if args.probe_type == "mlp" else None,
         "train_metrics": train_metrics,
+        "in_domain_holdout_metrics": in_domain_holdout_metrics,
         "heldout_texture_metrics": test_metrics,
         "distance_metrics": distance_metrics,
         "csv_path": csv_path,
