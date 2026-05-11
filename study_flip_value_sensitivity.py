@@ -9,6 +9,7 @@ import numpy as np
 import torch as th
 
 from collect_value_map import load_model, set_seed
+from achievement_distillation.constant import TASKS
 from achievement_distillation.semantic_flip import apply_flip_visible_world_state
 from counterfactual_env_editor import (
     get_hidsize,
@@ -82,8 +83,19 @@ def base_value_bin(base_value: float) -> str:
     return "base_gte_3.0"
 
 
-def score_flip_modes(model, base_env, base_obs, device, states, rnn_states, modes, save_dir=None, stem=None):
-    base_scores = score_observation(model, base_obs, device, states, rnn_states)
+def score_flip_modes(
+    model,
+    base_env,
+    base_obs,
+    device,
+    states,
+    rnn_states,
+    achievement_progress,
+    modes,
+    save_dir=None,
+    stem=None,
+):
+    base_scores = score_observation(model, base_obs, device, states, rnn_states, achievement_progress)
     row = {
         "base_value": base_scores["value"],
         "base_value_bin": base_value_bin(base_scores["value"]),
@@ -94,7 +106,7 @@ def score_flip_modes(model, base_env, base_obs, device, states, rnn_states, mode
         edits_log: List[str] = []
         apply_flip_visible_world_state(env_copy, mode, edits_log)
         flipped_obs = render_env(env_copy)
-        flipped_scores = score_observation(model, flipped_obs, device, states, rnn_states)
+        flipped_scores = score_observation(model, flipped_obs, device, states, rnn_states, achievement_progress)
         value = flipped_scores["value"]
         row[f"{mode}_value"] = value
         row[f"{mode}_delta"] = value - base_scores["value"]
@@ -154,6 +166,7 @@ def collect_study_rows(args, model, config, device):
         rnn_states = None
         if rnn_hidsize is not None:
             rnn_states = th.zeros(1, int(rnn_hidsize), device=device)
+        achievement_progress = th.zeros(1, len(TASKS), device=device)
 
         step_idx = 0
         while True:
@@ -183,6 +196,7 @@ def collect_study_rows(args, model, config, device):
                         device,
                         states.clone(),
                         None if rnn_states is None else rnn_states.clone(),
+                        achievement_progress.clone(),
                         modes,
                         save_dir=figure_dir,
                         stem=stem,
@@ -212,6 +226,8 @@ def collect_study_rows(args, model, config, device):
             act_kwargs = {"states": states}
             if rnn_states is not None:
                 act_kwargs["rnn_states"] = rnn_states
+            if getattr(model, "use_achievement_progress_input", False) or hasattr(model, "achievement_progress_dim"):
+                act_kwargs["achievement_progress"] = achievement_progress
             with th.no_grad():
                 outputs = model.act(obs_tensor, **act_kwargs)
                 action = int(outputs["actions"].item())
@@ -220,7 +236,14 @@ def collect_study_rows(args, model, config, device):
                 if "next_rnn_states" in outputs:
                     rnn_states = outputs["next_rnn_states"]
 
-            obs, _, done, _ = env.step(action)
+            obs, _, done, info = env.step(action)
+            achievements = info.get("achievements") if isinstance(info, dict) else None
+            if achievements is not None:
+                achievement_progress = th.tensor(
+                    [[1.0 if achievements.get(task, 0) > 0 else 0.0 for task in TASKS]],
+                    dtype=th.float32,
+                    device=device,
+                )
             step_idx += 1
             if done or (args.max_step is not None and step_idx > args.max_step):
                 break
