@@ -203,6 +203,21 @@ class CountMLP(th.nn.Module):
         return self.net(x).squeeze(-1)
 
 
+class CoarseMagnitudeMLP(th.nn.Module):
+    def __init__(self, insize: int, hidden: int, nclasses: int):
+        super().__init__()
+        self.net = th.nn.Sequential(
+            th.nn.Linear(insize, hidden),
+            th.nn.ReLU(),
+            th.nn.Linear(hidden, hidden),
+            th.nn.ReLU(),
+            th.nn.Linear(hidden, nclasses),
+        )
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        return self.net(x)
+
+
 def fit_mlp_count_probe(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -251,6 +266,68 @@ def fit_mlp_count_probe(
     return np.concatenate(preds, axis=0), mean, std
 
 
+def magnitude_label(count: int) -> int:
+    if count == 1:
+        return 0
+    if count <= 3:
+        return 1
+    return 2
+
+
+def magnitude_label_name(label: int) -> str:
+    return ("low", "medium", "high")[int(label)]
+
+
+def fit_coarse_magnitude_probe(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_all: np.ndarray,
+    hidden: int,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    seed: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    mean = x_train.mean(axis=0, keepdims=True)
+    std = x_train.std(axis=0, keepdims=True) + 1e-6
+    x_train_std = ((x_train - mean) / std).astype(np.float32)
+    x_all_std = ((x_all - mean) / std).astype(np.float32)
+    y_train = y_train.astype(np.int64)
+
+    device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
+    generator = th.Generator(device="cpu")
+    generator.manual_seed(seed)
+    dataset = th.utils.data.TensorDataset(th.from_numpy(x_train_std), th.from_numpy(y_train))
+    loader = th.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        generator=generator,
+    )
+    model = CoarseMagnitudeMLP(x_train.shape[1], hidden, nclasses=3).to(device)
+    opt = th.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    model.train()
+    for _epoch in range(epochs):
+        for xb, yb in loader:
+            xb = xb.to(device)
+            yb = yb.to(device)
+            logits = model(xb)
+            loss = th.nn.functional.cross_entropy(logits, yb)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+
+    model.eval()
+    probs = []
+    with th.no_grad():
+        for start in range(0, len(x_all_std), 1024):
+            xb = th.from_numpy(x_all_std[start : start + 1024]).to(device)
+            probs.append(th.softmax(model(xb), dim=-1).detach().cpu().numpy())
+    probs = np.concatenate(probs, axis=0)
+    preds = probs.argmax(axis=1)
+    return preds, probs, mean, std
+
+
 def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     mae = float(np.mean(np.abs(y_true - y_pred)))
     rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
@@ -279,6 +356,33 @@ def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, floa
         "zero_one_many_accuracy": bin_acc,
         "zero_one_low_high_accuracy": coarse_acc,
     }
+
+
+def classification_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    return {
+        "accuracy": float(np.mean(y_true == y_pred)),
+        "low_accuracy": float(np.mean(y_pred[y_true == 0] == 0)) if np.any(y_true == 0) else float("nan"),
+        "medium_accuracy": float(np.mean(y_pred[y_true == 1] == 1)) if np.any(y_true == 1) else float("nan"),
+        "high_accuracy": float(np.mean(y_pred[y_true == 2] == 2)) if np.any(y_true == 2) else float("nan"),
+    }
+
+
+def per_texture_classification_rows(rows: Sequence[Dict], y_true: np.ndarray, y_pred: np.ndarray) -> List[Dict]:
+    out = []
+    textures = sorted(set(row["texture"] for row in rows))
+    row_textures = np.array([row["texture"] for row in rows])
+    for texture in textures:
+        mask = row_textures == texture
+        metrics = classification_metrics(y_true[mask], y_pred[mask])
+        out.append(
+            {
+                "texture": texture,
+                "split": next(row["split"] for row in rows if row["texture"] == texture),
+                "samples": int(mask.sum()),
+                **metrics,
+            }
+        )
+    return out
 
 
 def centroid_rows(features: np.ndarray, rows: Sequence[Dict]) -> Tuple[List[Dict], np.ndarray]:
@@ -462,6 +566,28 @@ def save_value_plot(rows: Sequence[Dict], output_path: str):
     plt.close(fig)
 
 
+def save_coarse_accuracy_plot(per_texture_rows: Sequence[Dict], output_path: str):
+    rows = list(per_texture_rows)
+    textures = [row["texture"] for row in rows]
+    accuracies = [row["accuracy"] for row in rows]
+    colors = ["#8abf88" if row["split"] == "train" else "#df8f44" for row in rows]
+    fig, ax = plt.subplots(1, 1, figsize=(8.5, 4.6))
+    ax.bar(textures, accuracies, color=colors)
+    ax.axhline(1.0 / 3.0, color="black", linestyle="--", linewidth=1.2, alpha=0.65, label="chance")
+    ax.set_ylim(0.0, 1.0)
+    ax.set_ylabel("low / medium / high accuracy")
+    ax.set_title("Coarse magnitude probe by texture")
+    ax.legend(frameon=False)
+    for tick in ax.get_xticklabels():
+        tick.set_rotation(25)
+        tick.set_ha("right")
+    for i, acc in enumerate(accuracies):
+        ax.text(i, min(acc + 0.03, 0.97), f"{acc:.2f}", ha="center", va="bottom", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Test whether count is linearly decodable across held-out Crafter textures/objects."
@@ -477,7 +603,7 @@ def main():
     parser.add_argument("--num_layouts", type=int, default=50)
     parser.add_argument("--feature_key", type=str, default="vf_latents")
     parser.add_argument("--value_only", action="store_true", help="Only make the value-by-count plot; skip probes.")
-    parser.add_argument("--probe_type", choices=["ridge", "mlp"], default="ridge")
+    parser.add_argument("--probe_type", choices=["ridge", "mlp", "coarse_mlp"], default="ridge")
     parser.add_argument("--ridge", type=float, default=10.0)
     parser.add_argument("--train_holdout_fraction", type=float, default=0.2)
     parser.add_argument("--mlp_hidden", type=int, default=256)
@@ -600,6 +726,120 @@ def main():
     probe_train_mask = train_mask & (layout_ids < train_cutoff)
     in_domain_holdout_mask = train_mask & (layout_ids >= train_cutoff)
     texture_holdout_mask = ~train_mask
+
+    if args.probe_type == "coarse_mlp":
+        if 0 in counts:
+            raise ValueError("--probe_type coarse_mlp expects positive counts only, e.g. --counts 1,2,3,4,5,6.")
+        y_class = np.array([magnitude_label(int(v)) for v in y], dtype=np.int64)
+        y_pred_class, y_prob, mean, std = fit_coarse_magnitude_probe(
+            features[probe_train_mask],
+            y_class[probe_train_mask],
+            features,
+            hidden=args.mlp_hidden,
+            epochs=args.mlp_epochs,
+            batch_size=args.mlp_batch_size,
+            lr=args.mlp_lr,
+            seed=args.eval_seed,
+        )
+        for row, pred, prob in zip(rows, y_pred_class, y_prob):
+            true_label = magnitude_label(int(row["count"]))
+            row["magnitude_label"] = magnitude_label_name(true_label)
+            row["predicted_magnitude_label"] = magnitude_label_name(int(pred))
+            row["prob_low"] = float(prob[0])
+            row["prob_medium"] = float(prob[1])
+            row["prob_high"] = float(prob[2])
+
+        train_metrics = classification_metrics(y_class[probe_train_mask], y_pred_class[probe_train_mask])
+        in_domain_holdout_metrics = (
+            classification_metrics(y_class[in_domain_holdout_mask], y_pred_class[in_domain_holdout_mask])
+            if np.any(in_domain_holdout_mask)
+            else {}
+        )
+        test_metrics = classification_metrics(y_class[texture_holdout_mask], y_pred_class[texture_holdout_mask])
+        standardized_features = (features - mean) / std
+        distance_metrics = distance_diagnostic(
+            standardized_features,
+            y.astype(np.int64),
+            types,
+            max_pairs=args.max_distance_pairs,
+            seed=args.eval_seed,
+        )
+        centroid_distances = centroid_distance_rows(standardized_features, rows)
+        per_texture_rows = per_texture_classification_rows(rows, y_class, y_pred_class)
+
+        stem = f"{args.exp_name}-s{args.train_seed:02}-e{args.ckpt_epoch:03}-{args.feature_key}-coarse_magnitude"
+        csv_path = os.path.join(args.output_dir, f"{stem}.csv")
+        texture_csv_path = os.path.join(args.output_dir, f"{stem}-texture_accuracy.csv")
+        centroid_csv_path = os.path.join(args.output_dir, f"{stem}-centroid_distances.csv")
+        json_path = os.path.join(args.output_dir, f"{stem}.json")
+        plot_path = os.path.join(args.output_dir, f"{stem}.png")
+        accuracy_plot_path = os.path.join(args.output_dir, f"{stem}-texture_accuracy.png")
+        examples_path = os.path.join(args.output_dir, f"{stem}-examples_count{args.example_count}.png")
+        npz_path = os.path.join(args.output_dir, f"{stem}.npz")
+
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        with open(texture_csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(per_texture_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(per_texture_rows)
+        with open(centroid_csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(centroid_distances[0].keys()))
+            writer.writeheader()
+            writer.writerows(centroid_distances)
+        np.savez_compressed(
+            npz_path,
+            features=features,
+            counts=y,
+            magnitude_labels=y_class,
+            predicted_magnitude_labels=y_pred_class,
+            magnitude_probs=y_prob,
+            textures=types,
+            probe_train_mask=probe_train_mask,
+            in_domain_holdout_mask=in_domain_holdout_mask,
+            texture_holdout_mask=texture_holdout_mask,
+            feature_key=args.feature_key,
+        )
+        save_value_plot(rows, plot_path)
+        save_coarse_accuracy_plot(per_texture_rows, accuracy_plot_path)
+        save_examples_montage(obs_examples, textures, args.example_count, examples_path)
+
+        summary = {
+            "checkpoint": ckpt_path,
+            "feature_key": args.feature_key,
+            "train_textures": list(train_textures),
+            "test_textures": list(test_textures),
+            "counts": list(counts),
+            "magnitude_bins": {"low": [1], "medium": [2, 3], "high": [4, 5, 6]},
+            "num_layouts": args.num_layouts,
+            "probe_type": args.probe_type,
+            "train_holdout_fraction": args.train_holdout_fraction,
+            "probe_train_samples": int(probe_train_mask.sum()),
+            "in_domain_holdout_samples": int(in_domain_holdout_mask.sum()),
+            "heldout_texture_samples": int(texture_holdout_mask.sum()),
+            "memory_tasks": list(memory_tasks),
+            "inventory": inventory_updates,
+            "mlp_hidden": args.mlp_hidden,
+            "mlp_epochs": args.mlp_epochs,
+            "train_metrics": train_metrics,
+            "in_domain_holdout_metrics": in_domain_holdout_metrics,
+            "heldout_texture_metrics": test_metrics,
+            "per_texture_metrics": per_texture_rows,
+            "distance_metrics": distance_metrics,
+            "csv_path": csv_path,
+            "texture_csv_path": texture_csv_path,
+            "centroid_csv_path": centroid_csv_path,
+            "npz_path": npz_path,
+            "plot_path": plot_path,
+            "accuracy_plot_path": accuracy_plot_path,
+            "examples_path": examples_path,
+        }
+        with open(json_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(json.dumps(summary, indent=2), flush=True)
+        return
 
     if args.probe_type == "ridge":
         weights, mean, std = fit_ridge_count_probe(features[probe_train_mask], y[probe_train_mask], args.ridge)
