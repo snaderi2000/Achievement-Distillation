@@ -1,0 +1,154 @@
+Explicit Achievement-Memory PPO Network
+=======================================
+
+Inputs
+------
+
+  image observation O_t
+    shape: 64 x 64 x 3
+
+  achievement_progress_t
+    shape: 22-d binary vector
+    1 = achievement already completed in current episode
+    0 = achievement not completed yet
+
+
+Image Encoder
+-------------
+
+  O_t
+    |
+    v
+  IMPALA CNN
+    channels: [64, 128, 128]
+    residual blocks per stack: 2
+    BatchNorm: off
+    GroupNorm groups: 1
+    |
+    v
+  dense projection
+    Linear 256 -> 1024
+    ReLU
+    |
+    v
+  image_latent z_t
+    shape: 1024
+
+
+Explicit Memory Encoder
+-----------------------
+
+  achievement_progress_t
+    shape: 22
+    |
+    v
+  LayerNorm(22)
+    |
+    v
+  Linear 22 -> 256
+    |
+    v
+  ReLU
+    |
+    v
+  Linear 256 -> 256
+    |
+    v
+  ReLU
+    |
+    v
+  memory_latent m_t
+    shape: 256
+
+
+Shared Representation
+---------------------
+
+  image_latent z_t      memory_latent m_t
+       1024                   256
+         \                     /
+          \                   /
+           v                 v
+        concat([z_t, m_t])
+                 |
+                 v
+             shared_t
+             shape: 1280
+
+
+Actor Head
+----------
+
+  shared_t
+    shape: 1280
+    |
+    v
+  LayerNorm(1280)
+    |
+    v
+  Linear 1280 -> 1024
+    |
+    v
+  ReLU
+    |
+    v
+  pi_latents
+    shape: 1024
+    |
+    v
+  Linear 1024 -> 17
+    |
+    v
+  action logits
+
+
+Critic Head
+-----------
+
+  shared_t
+    shape: 1280
+    |
+    v
+  LayerNorm(1280)
+    |
+    v
+  Linear 1280 -> 1280
+    |
+    v
+  ReLU
+    |
+    v
+  vf_latents
+    shape: 1280
+    |
+    v
+  Linear 1280 -> 1
+    |
+    v
+  scalar value V(O_t, achievement_progress_t)
+
+
+Probe Feature Notes
+-------------------
+
+  latents
+    image-only feature after IMPALA + projection
+    shape: 1024
+
+  memory_latents
+    encoded explicit achievement-memory feature
+    shape: 256
+
+  shared_t
+    concat(image_latent, memory_latent)
+    shape: 1280
+    not currently saved as a model output key
+
+  vf_latents
+    critic feature after shared_t passes through critic LayerNorm/Linear/ReLU
+    shape: 1280
+    this is what --feature_key vf_latents probes
+
+  pi_latents
+    actor feature after shared_t passes through actor LayerNorm/Linear/ReLU
+    shape: 1024

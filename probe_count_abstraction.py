@@ -134,6 +134,25 @@ def extract_feature(
     return feature, value
 
 
+def score_value(
+    model,
+    obs: np.ndarray,
+    device: th.device,
+    achievement_progress: th.Tensor | None,
+) -> float:
+    obs_tensor = obs_to_tensor(obs, device)
+    kwargs = {}
+    if achievement_progress is not None:
+        uses_achievement_progress = (
+            getattr(model, "use_achievement_progress_input", False) or hasattr(model, "achievement_progress_dim")
+        )
+        if uses_achievement_progress:
+            kwargs["achievement_progress"] = achievement_progress
+    with th.no_grad():
+        outputs = model.act(obs_tensor, **kwargs)
+    return float(outputs["vpreds"].item())
+
+
 def quantity_bin(count: int) -> int:
     if count == 0:
         return 0
@@ -420,6 +439,29 @@ def save_plots(
     plt.close(fig)
 
 
+def save_value_plot(rows: Sequence[Dict], output_path: str):
+    types = sorted(set(row["texture"] for row in rows))
+    counts = sorted(set(int(row["count"]) for row in rows))
+    fig, ax = plt.subplots(1, 1, figsize=(8.0, 5.0))
+
+    for texture in types:
+        means = []
+        stds = []
+        for count in counts:
+            values = [row["value"] for row in rows if row["texture"] == texture and row["count"] == count]
+            means.append(float(np.mean(values)))
+            stds.append(float(np.std(values)))
+        ax.errorbar(counts, means, yerr=stds, marker="o", capsize=3, label=texture)
+
+    ax.set_title("Value by count and texture")
+    ax.set_xlabel("count")
+    ax.set_ylabel("V(obs)")
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Test whether count is linearly decodable across held-out Crafter textures/objects."
@@ -434,6 +476,7 @@ def main():
     parser.add_argument("--counts", type=str, default="0,1,2,3,4,5")
     parser.add_argument("--num_layouts", type=int, default=50)
     parser.add_argument("--feature_key", type=str, default="vf_latents")
+    parser.add_argument("--value_only", action="store_true", help="Only make the value-by-count plot; skip probes.")
     parser.add_argument("--probe_type", choices=["ridge", "mlp"], default="ridge")
     parser.add_argument("--ridge", type=float, default=10.0)
     parser.add_argument("--train_holdout_fraction", type=float, default=0.2)
@@ -485,13 +528,17 @@ def main():
                 env = copy.deepcopy(base_env)
                 placed = place_count_texture(env, texture, count, rng)
                 obs = render_env(env)
-                feature, value = extract_feature(
-                    model,
-                    obs,
-                    device,
-                    feature_key=args.feature_key,
-                    achievement_progress=achievement_progress,
-                )
+                if args.value_only:
+                    feature = None
+                    value = score_value(model, obs, device, achievement_progress)
+                else:
+                    feature, value = extract_feature(
+                        model,
+                        obs,
+                        device,
+                        feature_key=args.feature_key,
+                        achievement_progress=achievement_progress,
+                    )
                 rows.append(
                     {
                         "texture": texture,
@@ -504,12 +551,43 @@ def main():
                         "placed_cells": json.dumps(placed),
                     }
                 )
-                features.append(feature)
+                if feature is not None:
+                    features.append(feature)
                 if layout_id == 0:
                     obs_examples[(texture, count)] = obs
                 env.close()
 
     base_env.close()
+    stem = f"{args.exp_name}-s{args.train_seed:02}-e{args.ckpt_epoch:03}-value-count"
+    if args.value_only:
+        csv_path = os.path.join(args.output_dir, f"{stem}.csv")
+        json_path = os.path.join(args.output_dir, f"{stem}.json")
+        plot_path = os.path.join(args.output_dir, f"{stem}.png")
+        examples_path = os.path.join(args.output_dir, f"{stem}-examples_count{args.example_count}.png")
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        save_value_plot(rows, plot_path)
+        save_examples_montage(obs_examples, textures, args.example_count, examples_path)
+        summary = {
+            "checkpoint": ckpt_path,
+            "mode": "value_only",
+            "train_textures": list(train_textures),
+            "test_textures": list(test_textures),
+            "counts": list(counts),
+            "num_layouts": args.num_layouts,
+            "memory_tasks": list(memory_tasks),
+            "inventory": inventory_updates,
+            "csv_path": csv_path,
+            "plot_path": plot_path,
+            "examples_path": examples_path,
+        }
+        with open(json_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(json.dumps(summary, indent=2), flush=True)
+        return
+
     features = np.stack(features, axis=0)
     y = np.array([row["count"] for row in rows], dtype=np.float64)
     types = np.array([row["texture"] for row in rows])
