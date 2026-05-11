@@ -153,6 +153,61 @@ def save_distance_sweep(rows, output_path: str):
     plt.close(fig)
 
 
+def save_direction_sweep(
+    baseline_obs,
+    rows,
+    baseline_value: float,
+    arrow_delta: Tuple[int, int],
+    memory_tasks: Tuple[str, ...],
+    inventory_updates: Dict[str, int],
+    output_path: str,
+):
+    fig = plt.figure(figsize=(14.0, 7.2))
+    grid = fig.add_gridspec(2, 5, height_ratios=[1.0, 0.9], width_ratios=[1, 1, 1, 1, 1])
+
+    ax = fig.add_subplot(grid[0, 0])
+    ax.imshow(baseline_obs)
+    ax.set_title(f"Baseline\nV={baseline_value:.3f}", fontsize=11)
+    ax.axis("off")
+
+    for idx, row in enumerate(rows):
+        ax = fig.add_subplot(grid[0, idx + 1])
+        ax.imshow(row["obs"])
+        ax.set_title(
+            f"{row['direction']}\nV={row['arrow_value']:.3f}  d={row['delta_value']:+.3f}",
+            fontsize=11,
+        )
+        ax.axis("off")
+
+    ax = fig.add_subplot(grid[1, :])
+    directions = [row["direction"] for row in rows]
+    deltas = [row["delta_value"] for row in rows]
+    colors = ["#d55e00" if direction == "down" else "#777777" for direction in directions]
+    ax.axhline(0.0, color="black", linewidth=1, alpha=0.55)
+    ax.bar(directions, deltas, color=colors)
+    ax.set_ylabel("V(arrow direction) - V(grass)")
+    ax.set_title("Value sensitivity to arrow direction at fixed position")
+    ax.text(
+        0.01,
+        0.03,
+        "arrow delta: "
+        + str(tuple(arrow_delta))
+        + "\nexpected hit direction: down"
+        + "\nmemory: "
+        + (", ".join(memory_tasks) if memory_tasks else "empty")
+        + "\ninv: "
+        + ", ".join(f"{k}={v}" for k, v in inventory_updates.items() if v > 0),
+        transform=ax.transAxes,
+        fontsize=9,
+        va="bottom",
+    )
+
+    fig.suptitle("Arrow-direction dynamics counterfactual", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Compare all-grass baseline vs an incoming arrow aimed at the player."
@@ -164,6 +219,11 @@ def main():
     parser.add_argument("--eval_seed", type=int, default=67)
     parser.add_argument("--arrow_delta", type=str, default="0,-2")
     parser.add_argument("--arrow_direction", choices=sorted(ARROW_OBJECTS), default="down")
+    parser.add_argument(
+        "--direction_sweep",
+        action="store_true",
+        help="Score all four arrow rotations at the same arrow_delta.",
+    )
     parser.add_argument(
         "--distances",
         type=str,
@@ -242,6 +302,51 @@ def main():
         "delta_value": arrow_scores["value"] - baseline_scores["value"],
         "figure_path": figure_path,
     }
+
+    if args.direction_sweep:
+        direction_rows = []
+        for direction in ("down", "left", "right", "up"):
+            obs, _ = make_observation(
+                args.eval_seed,
+                inventory_updates,
+                arrow_delta=arrow_delta,
+                arrow_direction=direction,
+            )
+            scores = score_observation(
+                model,
+                obs,
+                device,
+                achievement_progress=achievement_progress,
+            )
+            direction_rows.append(
+                {
+                    "direction": direction,
+                    "baseline_value": baseline_scores["value"],
+                    "arrow_value": scores["value"],
+                    "delta_value": scores["value"] - baseline_scores["value"],
+                    "obs": obs,
+                }
+            )
+        direction_stem = f"{args.exp_name}-s{args.train_seed:02}-e{args.ckpt_epoch:04}-arrow_direction_sweep"
+        direction_path = os.path.join(args.output_dir, f"{direction_stem}.png")
+        direction_csv_path = os.path.join(args.output_dir, f"{direction_stem}.csv")
+        save_direction_sweep(
+            baseline_obs,
+            direction_rows,
+            baseline_scores["value"],
+            arrow_delta,
+            memory_tasks,
+            inventory,
+            direction_path,
+        )
+        csv_rows = [{k: v for k, v in row.items() if k != "obs"} for row in direction_rows]
+        with open(direction_csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(csv_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(csv_rows)
+        summary["direction_sweep"] = csv_rows
+        summary["direction_sweep_path"] = direction_path
+        summary["direction_sweep_csv_path"] = direction_csv_path
 
     if args.distances:
         rows = []
