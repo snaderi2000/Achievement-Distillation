@@ -107,6 +107,14 @@ def main():
         replay.rnn_states,
         actual_memory,
     )["value"]
+    base_value_removed_memory = score_observation(
+        model,
+        base_obs,
+        device,
+        replay.states,
+        replay.rnn_states,
+        edited_memory,
+    )["value"]
 
     dx, dy = parse_vec2(args.skeleton_delta)
     edits_log: List[str] = []
@@ -137,6 +145,12 @@ def main():
             "value": base_value_actual_memory,
             "has_skeleton_counterfactual": False,
             "memory_task_removed": "",
+        },
+        {
+            "condition": f"replayed_obs_without_{args.remove_memory_task}_memory",
+            "value": base_value_removed_memory,
+            "has_skeleton_counterfactual": False,
+            "memory_task_removed": args.remove_memory_task,
         },
         {
             "condition": "skeleton_actual_memory",
@@ -178,6 +192,7 @@ def main():
         "removed_memory_task": args.remove_memory_task,
         "values": rows,
         "delta_skeleton_vs_replay_actual_memory": skeleton_value_actual_memory - base_value_actual_memory,
+        "delta_removed_memory_on_replayed_obs": base_value_removed_memory - base_value_actual_memory,
         "delta_removed_memory_on_skeleton_obs": skeleton_value_removed_memory - skeleton_value_actual_memory,
         "csv_path": csv_path,
         "figure_path": figure_path,
