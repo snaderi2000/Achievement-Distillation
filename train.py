@@ -55,7 +55,7 @@ def main(args):
         log_dir = os.path.join("./logs", run_name)
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, "stats.jsonl")
-        log_file = open(log_path, "w")
+        log_file = open(log_path, "a" if args.resume_ckpt_epoch is not None else "w")
 
         # W&B
         logger = Logger(config=config, group=group_name, name=run_name)
@@ -108,6 +108,19 @@ def main(args):
         **config["model_kwargs"],
     )
     model = model.to(device)
+    start_epoch = 1
+    if args.resume_ckpt_epoch is not None:
+        resume_run_name = f"{args.resume_exp_name or args.exp_name}-{args.resume_timestamp or args.timestamp}-s{args.resume_seed if args.resume_seed is not None else args.seed:02}"
+        resume_ckpt_path = os.path.join("./models", resume_run_name, f"agent-e{args.resume_ckpt_epoch:03}.pt")
+        if not os.path.exists(resume_ckpt_path):
+            raise FileNotFoundError(f"Resume checkpoint not found at {resume_ckpt_path}")
+        model.load_state_dict(th.load(resume_ckpt_path, map_location=device))
+        start_epoch = args.resume_ckpt_epoch + 1
+        print(f"Resumed model weights from {resume_ckpt_path}")
+        print(
+            "Note: optimizer, rollout storage, score history, and W&B run state are not restored; "
+            "training continues from the checkpointed weights."
+        )
     print(model)
 
     # Create algorithm
@@ -139,9 +152,9 @@ def main(args):
     rollout_env_steps = config["nstep"] * config["nproc"]
     episode_reward_window_steps = int(config.get("episode_reward_window_steps", 100_000))
     recent_episode_rewards = deque()
-    total_env_steps = 0
+    total_env_steps = (start_epoch - 1) * rollout_env_steps
 
-    for epoch in range(1, config["nepoch"] + 1):
+    for epoch in range(start_epoch, config["nepoch"] + 1):
         # Sample episodes
         rollout_stats = sample_rollouts(
             venv,
@@ -240,6 +253,30 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--log_stats", action="store_true")
     parser.add_argument("--save_ckpt", action="store_true")
+    parser.add_argument(
+        "--resume_ckpt_epoch",
+        type=int,
+        default=None,
+        help="Load model weights from this epoch and continue training at epoch+1.",
+    )
+    parser.add_argument(
+        "--resume_exp_name",
+        type=str,
+        default=None,
+        help="Optional source experiment name for --resume_ckpt_epoch. Defaults to --exp_name.",
+    )
+    parser.add_argument(
+        "--resume_timestamp",
+        type=str,
+        default=None,
+        help="Optional source timestamp for --resume_ckpt_epoch. Defaults to --timestamp.",
+    )
+    parser.add_argument(
+        "--resume_seed",
+        type=int,
+        default=None,
+        help="Optional source train seed for --resume_ckpt_epoch. Defaults to --seed.",
+    )
     args = parser.parse_args()
 
     # Run main
