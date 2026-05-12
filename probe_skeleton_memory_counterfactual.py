@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import torch as th
 
 from achievement_distillation.constant import TASKS
-from collect_value_map import load_model, set_seed
+from collect_value_map import load_model, observation_to_uint8_hwc, set_seed
 from counterfactual_env_editor import (
     apply_material_edits,
     apply_spawn_object,
@@ -32,15 +32,12 @@ def remove_task(progress: th.Tensor, task: str) -> th.Tensor:
     return edited
 
 
-def replay_dataset_actions_to_step(
+def load_dataset_step(
     dataset_path: str,
-    eval_seed: int,
     episode_id: int,
     step_id: int,
     device: th.device,
 ):
-    from crafter.env import Env
-
     if not os.path.exists(dataset_path):
         raise FileNotFoundError(f"Rollout dataset not found: {dataset_path}")
     dataset = th.load(dataset_path, map_location="cpu")
@@ -60,24 +57,40 @@ def replay_dataset_actions_to_step(
         raise ValueError(f"Dataset has no episode={episode_id}, step={step_id}.")
     target_index = int(target_matches[0].item())
 
+    progress = (
+        progress_inputs[target_index].float().view(1, -1).to(device)
+        if progress_inputs is not None
+        else th.zeros(1, len(TASKS), device=device)
+    )
+    obs = observation_to_uint8_hwc(dataset["observations"][target_index])
+    return dataset, obs, progress, target_index
+
+
+def replay_dataset_actions_to_index(dataset, eval_seed: int, episode_id: int, target_index: int):
+    from crafter.env import Env
+
+    episode_ids = dataset["episode_ids"].cpu()
+    step_ids = dataset["step_ids"].cpu()
+    actions = dataset["actions"].cpu()
+    target_step = int(step_ids[target_index].item())
+
+    mask = episode_ids == int(episode_id)
+    episode_indices = th.nonzero(mask, as_tuple=False).view(-1)
+    episode_indices = episode_indices[th.argsort(step_ids[episode_indices])]
+
     env = Env(seed=eval_seed + int(episode_id))
     obs = env.reset()
     for idx_tensor in episode_indices:
         idx = int(idx_tensor.item())
         current_step = int(step_ids[idx].item())
-        if current_step == step_id:
-            progress = (
-                progress_inputs[idx].float().view(1, -1).to(device)
-                if progress_inputs is not None
-                else th.zeros(1, len(TASKS), device=device)
-            )
-            return env, obs, progress, target_index
+        if idx == int(target_index):
+            return env, obs
         obs, _, done, _info = env.step(int(actions[idx].item()))
         if done:
-            raise ValueError(f"Episode ended before reaching step={step_id}.")
+            raise ValueError(f"Episode ended before reaching dataset_idx={target_index}, step={target_step}.")
 
     env.close()
-    raise ValueError(f"Could not replay dataset actions to episode={episode_id}, step={step_id}.")
+    raise ValueError(f"Could not replay dataset actions to dataset_idx={target_index}.")
 
 
 def save_figure(base_obs, skeleton_obs, rows: List[Dict[str, object]], output_path: str):
@@ -104,6 +117,19 @@ def save_figure(base_obs, skeleton_obs, rows: List[Dict[str, object]], output_pa
     for bar, value in zip(bars, values):
         ax2.text(bar.get_x() + bar.get_width() / 2, value, f"{value:.3f}", ha="center", va="bottom")
 
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_debug_replay_figure(dataset_obs, replay_obs, output_path: str):
+    fig, axes = plt.subplots(1, 2, figsize=(7.8, 3.8))
+    axes[0].imshow(dataset_obs)
+    axes[0].set_title("HTML/dataset obs")
+    axes[0].axis("off")
+    axes[1].imshow(replay_obs)
+    axes[1].set_title("replayed env obs")
+    axes[1].axis("off")
     fig.tight_layout()
     fig.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -141,15 +167,21 @@ def main():
 
     model, config, ckpt_path = load_model(args.exp_name, args.timestamp, args.train_seed, args.ckpt_epoch, device)
     if args.rollout_dataset_path:
-        replay_env, replay_obs, actual_memory, dataset_idx = replay_dataset_actions_to_step(
+        dataset, dataset_obs, actual_memory, dataset_idx = load_dataset_step(
             args.rollout_dataset_path,
-            args.eval_seed,
             args.episode_id,
             args.step_id,
             device,
         )
+        replay_env, replay_obs = replay_dataset_actions_to_index(
+            dataset,
+            args.eval_seed,
+            args.episode_id,
+            dataset_idx,
+        )
         replay_states = None
         replay_rnn_states = None
+        base_obs = dataset_obs.copy()
     else:
         replay = replay_to_step(
             model=model,
@@ -165,8 +197,8 @@ def main():
         replay_states = replay.states
         replay_rnn_states = replay.rnn_states
         dataset_idx = None
+        base_obs = replay_obs.copy()
 
-    base_obs = replay_obs.copy()
     edited_memory = remove_task(actual_memory, args.remove_memory_task)
 
     base_value_actual_memory = score_observation(
@@ -240,6 +272,7 @@ def main():
     csv_path = os.path.join(args.output_dir, f"{stem}.csv")
     json_path = os.path.join(args.output_dir, f"{stem}.json")
     figure_path = os.path.join(args.output_dir, f"{stem}.png")
+    debug_replay_path = os.path.join(args.output_dir, f"{stem}-dataset-vs-replay.png")
 
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(
@@ -249,6 +282,8 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
     save_figure(base_obs, skeleton_obs, rows, figure_path)
+    if args.rollout_dataset_path:
+        save_debug_replay_figure(base_obs, replay_obs, debug_replay_path)
 
     summary = {
         "checkpoint": ckpt_path,
@@ -268,6 +303,7 @@ def main():
         "delta_removed_memory_on_skeleton_obs": skeleton_value_removed_memory - skeleton_value_actual_memory,
         "csv_path": csv_path,
         "figure_path": figure_path,
+        "debug_replay_path": debug_replay_path if args.rollout_dataset_path else None,
     }
     with open(json_path, "w") as f:
         json.dump(summary, f, indent=2)
