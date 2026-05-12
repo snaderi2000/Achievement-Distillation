@@ -132,6 +132,53 @@ def save_figure(
     plt.close(fig)
 
 
+def save_observation_figure(
+    baseline_obs: np.ndarray,
+    target_obs: np.ndarray,
+    target_material: str,
+    memory_tasks: Tuple[str, ...],
+    inventory_updates: Dict[str, int],
+    target_delta: Tuple[int, int],
+    output_path: str,
+):
+    shown_inventory = [
+        f"{name}={inventory_updates[name]}"
+        for name in ("health", "food", "drink", "energy", "wood_pickaxe", "stone", "wood")
+        if name in inventory_updates and inventory_updates[name] > 0
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(12.2, 4.0))
+    panels = [
+        (baseline_obs, "Baseline observation\nall grass"),
+        (target_obs, f"Counterfactual observation\n{target_material} at delta {tuple(target_delta)}"),
+    ]
+    for ax, (obs, title) in zip(axes[:2], panels):
+        ax.imshow(obs)
+        ax.set_title(title, fontsize=11)
+        ax.axis("off")
+
+    axes[2].axis("off")
+    axes[2].text(
+        0.0,
+        0.95,
+        "Observation fed to every checkpoint\n\n"
+        "memory:\n"
+        + ("  " + "\n  ".join(memory_tasks) if memory_tasks else "  empty")
+        + "\n\ninventory:\n  "
+        + (", ".join(shown_inventory) if shown_inventory else "empty")
+        + "\n\ntarget_delta:\n  "
+        + str(tuple(target_delta)),
+        transform=axes[2].transAxes,
+        fontsize=10,
+        va="top",
+        family="monospace",
+    )
+
+    fig.suptitle(f"Fixed observations for {target_material} value sweep", fontsize=13)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
 def save_sweep_figure(rows, target_material: str, output_path: str):
     epochs = [row["ckpt_epoch"] for row in rows]
     deltas = [row["delta_value"] for row in rows]
@@ -292,9 +339,19 @@ def main():
     if args.ckpt_epochs:
         stem = f"{args.exp_name}-s{args.train_seed:02}-{args.target_material}-sweep"
         figure_path = os.path.join(args.output_dir, f"{stem}.png")
+        observation_figure_path = os.path.join(args.output_dir, f"{stem}-observations.png")
         csv_path = os.path.join(args.output_dir, f"{stem}.csv")
         summary_path = os.path.join(args.output_dir, f"{stem}.json")
         save_sweep_figure(rows, args.target_material, figure_path)
+        save_observation_figure(
+            baseline_obs,
+            target_obs,
+            args.target_material,
+            memory_tasks,
+            inventory_updates,
+            target_delta,
+            observation_figure_path,
+        )
         with open(csv_path, "w", newline="") as f:
             writer = csv.DictWriter(
                 f,
@@ -311,6 +368,7 @@ def main():
             "inventory": inventory_updates,
             "rows": rows,
             "figure_path": figure_path,
+            "observation_figure_path": observation_figure_path,
             "csv_path": csv_path,
         }
         with open(summary_path, "w") as f:
