@@ -32,6 +32,54 @@ def remove_task(progress: th.Tensor, task: str) -> th.Tensor:
     return edited
 
 
+def replay_dataset_actions_to_step(
+    dataset_path: str,
+    eval_seed: int,
+    episode_id: int,
+    step_id: int,
+    device: th.device,
+):
+    from crafter.env import Env
+
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError(f"Rollout dataset not found: {dataset_path}")
+    dataset = th.load(dataset_path, map_location="cpu")
+    episode_ids = dataset["episode_ids"].cpu()
+    step_ids = dataset["step_ids"].cpu()
+    actions = dataset["actions"].cpu()
+    progress_inputs = dataset.get("achievement_progress_inputs")
+
+    mask = episode_ids == int(episode_id)
+    episode_indices = th.nonzero(mask, as_tuple=False).view(-1)
+    if episode_indices.numel() == 0:
+        raise ValueError(f"Dataset has no episode_id={episode_id}.")
+    episode_indices = episode_indices[th.argsort(step_ids[episode_indices])]
+
+    target_matches = episode_indices[step_ids[episode_indices] == int(step_id)]
+    if target_matches.numel() == 0:
+        raise ValueError(f"Dataset has no episode={episode_id}, step={step_id}.")
+    target_index = int(target_matches[0].item())
+
+    env = Env(seed=eval_seed + int(episode_id))
+    obs = env.reset()
+    for idx_tensor in episode_indices:
+        idx = int(idx_tensor.item())
+        current_step = int(step_ids[idx].item())
+        if current_step == step_id:
+            progress = (
+                progress_inputs[idx].float().view(1, -1).to(device)
+                if progress_inputs is not None
+                else th.zeros(1, len(TASKS), device=device)
+            )
+            return env, obs, progress, target_index
+        obs, _, done, _info = env.step(int(actions[idx].item()))
+        if done:
+            raise ValueError(f"Episode ended before reaching step={step_id}.")
+
+    env.close()
+    raise ValueError(f"Could not replay dataset actions to episode={episode_id}, step={step_id}.")
+
+
 def save_figure(base_obs, skeleton_obs, rows: List[Dict[str, object]], output_path: str):
     values = [float(row["value"]) for row in rows]
     labels = [str(row["condition"]).replace("_", "\n") for row in rows]
@@ -78,6 +126,12 @@ def main():
     parser.add_argument("--skeleton_delta", type=str, default="0,1")
     parser.add_argument("--remove_memory_task", type=str, default="defeat_skeleton")
     parser.add_argument("--target_material", type=str, default="grass")
+    parser.add_argument(
+        "--rollout_dataset_path",
+        type=str,
+        default=None,
+        help="Optional saved collect_value_map dataset. If set, replay recorded actions so the state matches the HTML.",
+    )
     parser.add_argument("--output_dir", type=str, default="skeleton_memory_counterfactual")
     args = parser.parse_args()
 
@@ -86,56 +140,72 @@ def main():
     device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
 
     model, config, ckpt_path = load_model(args.exp_name, args.timestamp, args.train_seed, args.ckpt_epoch, device)
-    replay = replay_to_step(
-        model=model,
-        config=config,
-        eval_seed=args.eval_seed,
-        target_episode=args.episode_id,
-        target_step=args.step_id,
-        device=device,
-    )
+    if args.rollout_dataset_path:
+        replay_env, replay_obs, actual_memory, dataset_idx = replay_dataset_actions_to_step(
+            args.rollout_dataset_path,
+            args.eval_seed,
+            args.episode_id,
+            args.step_id,
+            device,
+        )
+        replay_states = None
+        replay_rnn_states = None
+    else:
+        replay = replay_to_step(
+            model=model,
+            config=config,
+            eval_seed=args.eval_seed,
+            target_episode=args.episode_id,
+            target_step=args.step_id,
+            device=device,
+        )
+        replay_env = replay.env
+        replay_obs = replay.obs
+        actual_memory = replay.achievement_progress
+        replay_states = replay.states
+        replay_rnn_states = replay.rnn_states
+        dataset_idx = None
 
-    base_obs = replay.obs.copy()
-    actual_memory = replay.achievement_progress
+    base_obs = replay_obs.copy()
     edited_memory = remove_task(actual_memory, args.remove_memory_task)
 
     base_value_actual_memory = score_observation(
         model,
         base_obs,
         device,
-        replay.states,
-        replay.rnn_states,
+        replay_states,
+        replay_rnn_states,
         actual_memory,
     )["value"]
     base_value_removed_memory = score_observation(
         model,
         base_obs,
         device,
-        replay.states,
-        replay.rnn_states,
+        replay_states,
+        replay_rnn_states,
         edited_memory,
     )["value"]
 
     dx, dy = parse_vec2(args.skeleton_delta)
     edits_log: List[str] = []
-    apply_material_edits(replay.env, [(dx, dy, args.target_material)], edits_log)
-    apply_spawn_object(replay.env, [(dx, dy, "skeleton")], edits_log)
-    skeleton_obs = render_env(replay.env)
+    apply_material_edits(replay_env, [(dx, dy, args.target_material)], edits_log)
+    apply_spawn_object(replay_env, [(dx, dy, "skeleton")], edits_log)
+    skeleton_obs = render_env(replay_env)
 
     skeleton_value_actual_memory = score_observation(
         model,
         skeleton_obs,
         device,
-        replay.states,
-        replay.rnn_states,
+        replay_states,
+        replay_rnn_states,
         actual_memory,
     )["value"]
     skeleton_value_removed_memory = score_observation(
         model,
         skeleton_obs,
         device,
-        replay.states,
-        replay.rnn_states,
+        replay_states,
+        replay_rnn_states,
         edited_memory,
     )["value"]
 
@@ -185,6 +255,8 @@ def main():
         "eval_seed": args.eval_seed,
         "episode_id": args.episode_id,
         "step_id": args.step_id,
+        "dataset_idx": dataset_idx,
+        "rollout_dataset_path": args.rollout_dataset_path,
         "skeleton_delta": [dx, dy],
         "edits": edits_log,
         "actual_memory_tasks": active_memory_tasks(actual_memory),
@@ -200,7 +272,7 @@ def main():
     with open(json_path, "w") as f:
         json.dump(summary, f, indent=2)
 
-    replay.env.close()
+    replay_env.close()
     print(json.dumps(summary, indent=2), flush=True)
 
 
