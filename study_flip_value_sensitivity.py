@@ -12,8 +12,10 @@ from collect_value_map import load_model, set_seed
 from achievement_distillation.constant import TASKS
 from achievement_distillation.semantic_flip import apply_flip_visible_world_state
 from counterfactual_env_editor import (
+    crafter_inventory_rows,
     get_hidsize,
     render_env,
+    rotate_world_observation,
     save_side_by_side,
     score_observation,
     visible_object_orientation_report,
@@ -83,6 +85,11 @@ def base_value_bin(base_value: float) -> str:
     return "base_gte_3.0"
 
 
+def active_memory_tasks(achievement_progress: th.Tensor) -> List[str]:
+    values = achievement_progress.detach().cpu().view(-1).tolist()
+    return [task for task, value in zip(TASKS, values) if value > 0.5]
+
+
 def score_flip_modes(
     model,
     base_env,
@@ -102,10 +109,16 @@ def score_flip_modes(
         "visible_objects": json.dumps(state_object_counts(visible_object_orientation_report(base_env)), sort_keys=True),
     }
     for mode in modes:
-        env_copy = copy.deepcopy(base_env)
         edits_log: List[str] = []
-        apply_flip_visible_world_state(env_copy, mode, edits_log)
-        flipped_obs = render_env(env_copy)
+        env_copy = None
+        if mode == "world_rot180_pixels":
+            inventory_rows = crafter_inventory_rows(size=base_obs.shape[:2])
+            flipped_obs = rotate_world_observation(base_obs, 180, inventory_rows)
+            edits_log.append("rotate_world_pixels=180")
+        else:
+            env_copy = copy.deepcopy(base_env)
+            apply_flip_visible_world_state(env_copy, mode, edits_log)
+            flipped_obs = render_env(env_copy)
         flipped_scores = score_observation(model, flipped_obs, device, states, rnn_states, achievement_progress)
         value = flipped_scores["value"]
         row[f"{mode}_value"] = value
@@ -125,7 +138,8 @@ def score_flip_modes(
                 os.path.join(save_dir, f"{stem}-{mode}.png"),
                 ", ".join(edits_log),
             )
-        env_copy.close()
+        if env_copy is not None:
+            env_copy.close()
     return row
 
 
@@ -154,7 +168,7 @@ def save_ranked_figures_from_rows(rows: List[Dict], output_dir: str, modes: List
 def collect_study_rows(args, model, config, device):
     from crafter.env import Env
 
-    modes = ["horizontal", "vertical", "both"]
+    modes = ["horizontal", "vertical", "both", "world_rot180_pixels"]
     env = Env(seed=args.eval_seed)
     hidsize = get_hidsize(config)
     rnn_hidsize = config.get("model_kwargs", {}).get("rnn_hidsize")
@@ -187,6 +201,10 @@ def collect_study_rows(args, model, config, device):
                     "player_pos": json.dumps([int(x) for x in env._player.pos]),
                     "player_facing": json.dumps(list(getattr(env._player, "facing", []))),
                     "inventory": json.dumps(dict(env._player.inventory), sort_keys=True),
+                    "achievement_memory": json.dumps(active_memory_tasks(achievement_progress)),
+                    "achievement_memory_vector": json.dumps(
+                        [float(x) for x in achievement_progress.detach().cpu().view(-1).tolist()]
+                    ),
                 }
                 row.update(
                     score_flip_modes(
@@ -202,11 +220,9 @@ def collect_study_rows(args, model, config, device):
                         stem=stem,
                     )
                 )
-                row["max_abs_delta"] = max(row["horizontal_abs_delta"], row["vertical_abs_delta"], row["both_abs_delta"])
+                row["max_abs_delta"] = max(row[f"{mode}_abs_delta"] for mode in modes)
                 row["max_relative_abs_delta"] = max(
-                    row["horizontal_relative_abs_delta"],
-                    row["vertical_relative_abs_delta"],
-                    row["both_relative_abs_delta"],
+                    row[f"{mode}_relative_abs_delta"] for mode in modes
                 )
                 if figure_dir is not None:
                     for mode in modes:
@@ -269,7 +285,7 @@ def write_csv(path: str, rows: List[Dict]):
 
 
 def summarize_rows(rows: List[Dict]) -> Dict[str, object]:
-    modes = ["horizontal", "vertical", "both"]
+    modes = ["horizontal", "vertical", "both", "world_rot180_pixels"]
     return {
         **{f"{mode}_delta": scalar_stats([row[f"{mode}_delta"] for row in rows]) for mode in modes},
         **{
@@ -326,29 +342,30 @@ def main():
     if not rows:
         raise ValueError("No states were sampled. Try lowering --start_step or --step_stride.")
 
-    by_horizontal = sorted(rows, key=lambda row: row["horizontal_abs_delta"], reverse=True)
-    by_vertical = sorted(rows, key=lambda row: row["vertical_abs_delta"], reverse=True)
-    by_both = sorted(rows, key=lambda row: row["both_abs_delta"], reverse=True)
+    modes = ["horizontal", "vertical", "both", "world_rot180_pixels"]
+    sorted_by_mode = {
+        mode: sorted(rows, key=lambda row: row[f"{mode}_abs_delta"], reverse=True)
+        for mode in modes
+    }
     by_max = sorted(rows, key=lambda row: row["max_abs_delta"], reverse=True)
     by_max_relative = sorted(rows, key=lambda row: row["max_relative_abs_delta"], reverse=True)
 
     write_csv(os.path.join(args.output_dir, "all_states.csv"), rows)
-    write_csv(os.path.join(args.output_dir, "sorted_by_horizontal.csv"), by_horizontal)
-    write_csv(os.path.join(args.output_dir, "sorted_by_vertical.csv"), by_vertical)
-    write_csv(os.path.join(args.output_dir, "sorted_by_both.csv"), by_both)
+    for mode, mode_rows in sorted_by_mode.items():
+        write_csv(os.path.join(args.output_dir, f"sorted_by_{mode}.csv"), mode_rows)
     write_csv(os.path.join(args.output_dir, "sorted_by_max_abs_delta.csv"), by_max)
     write_csv(os.path.join(args.output_dir, "sorted_by_max_relative_abs_delta.csv"), by_max_relative)
 
-    save_ranked_figures_from_rows(by_max, args.output_dir, ["horizontal", "vertical", "both"], args.save_top_k)
+    save_ranked_figures_from_rows(by_max, args.output_dir, modes, args.save_top_k)
 
     summary = {
         "checkpoint": ckpt_path,
         "eval_seed": args.eval_seed,
         "num_states": len(rows),
+        "modes": modes,
         **summarize_rows(rows),
         "base_value_bins": summarize_by_base_value_bin(rows),
-        "top_by_horizontal": by_horizontal[: args.save_top_k],
-        "top_by_vertical": by_vertical[: args.save_top_k],
+        **{f"top_by_{mode}": mode_rows[: args.save_top_k] for mode, mode_rows in sorted_by_mode.items()},
         "top_by_max_abs_delta": by_max[: args.save_top_k],
         "top_by_max_relative_abs_delta": by_max_relative[: args.save_top_k],
     }

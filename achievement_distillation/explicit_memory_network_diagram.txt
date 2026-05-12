@@ -4,92 +4,80 @@ Explicit Achievement-Memory PPO Network
 Inputs
 ------
 
-  image observation O_t
-    shape: 64 x 64 x 3
-
-  achievement_progress_t
-    shape: 22-d binary vector
-    1 = achievement already completed in current episode
-    0 = achievement not completed yet
+  O_t                         achievement_progress_t
+  image observation           22-d binary achievement list
+  64 x 64 x 3                 1 = completed this episode
+                              0 = not completed yet
 
 
-Image Encoder
--------------
+Encoders
+--------
 
-  O_t
-    |
-    v
-  IMPALA CNN
-    channels: [64, 128, 128]
-    residual blocks per stack: 2
-    BatchNorm: off
-    GroupNorm groups: 1
-    |
-    v
-  dense projection
-    Linear 256 -> 1024
-    ReLU
-    |
-    v
-  image_latent z_t
-    shape: 1024
+  Image encoder
 
-
-Explicit Memory Encoder
------------------------
-
-  achievement_progress_t
-    shape: 22
-    |
-    v
-  LayerNorm(22)
-    |
-    v
-  Linear 22 -> 256
-    |
-    v
-  ReLU
-    |
-    v
-  Linear 256 -> 256
-    |
-    v
-  ReLU
-    |
-    v
-  memory_latent m_t
-    shape: 256
+    O_t
+      |
+      v
+    IMPALA CNN
+      channels: [64, 128, 128]
+      final map: 8 x 8 x 128
+      flattened: 8192
+      |
+      v
+    LayerNorm + Linear 8192 -> 256 + ReLU
+      |
+      v
+    LayerNorm + Linear 256 -> 1024 + ReLU
+      |
+      v
+    image_latent z_t
+      shape: 1024
 
 
-Shared Representation
----------------------
+  Explicit memory encoder
 
-  image_latent z_t      memory_latent m_t
-       1024                   256
-         \                     /
-          \                   /
-           v                 v
-        concat([z_t, m_t])
-                 |
-                 v
-             shared_t
-             shape: 1280
+    achievement_progress_t
+      shape: 22
+      |
+      v
+    LayerNorm(22)
+      |
+      v
+    Linear 22 -> 256 + ReLU
+      |
+      v
+    Linear 256 -> 256 + ReLU
+      |
+      v
+    memory_latent m_t
+      shape: 256
 
 
-Actor Head
-----------
+Shared Actor-Critic Input
+-------------------------
+
+      image_latent z_t              memory_latent m_t
+           1024                           256
+             \                             /
+              \                           /
+               v                         v
+                   concat([z_t, m_t])
+                           |
+                           v
+                        shared_t
+                        shape: 1280
+
+
+Actor
+-----
 
   shared_t
-    shape: 1280
     |
     v
   LayerNorm(1280)
     |
     v
-  Linear 1280 -> 1024
-    |
-    v
-  ReLU
+  Linear 1280 -> 1024 + ReLU
     |
     v
   pi_latents
@@ -102,20 +90,16 @@ Actor Head
   action logits
 
 
-Critic Head
------------
+Critic
+------
 
   shared_t
-    shape: 1280
     |
     v
   LayerNorm(1280)
     |
     v
-  Linear 1280 -> 1280
-    |
-    v
-  ReLU
+  Linear 1280 -> 1280 + ReLU
     |
     v
   vf_latents
@@ -128,27 +112,9 @@ Critic Head
   scalar value V(O_t, achievement_progress_t)
 
 
-Probe Feature Notes
--------------------
+Note
+----
 
-  latents
-    image-only feature after IMPALA + projection
-    shape: 1024
+  This model has no GRU recurrence.
+  The 22-d achievement list replaces the learned recurrent hidden state.
 
-  memory_latents
-    encoded explicit achievement-memory feature
-    shape: 256
-
-  shared_t
-    concat(image_latent, memory_latent)
-    shape: 1280
-    not currently saved as a model output key
-
-  vf_latents
-    critic feature after shared_t passes through critic LayerNorm/Linear/ReLU
-    shape: 1280
-    this is what --feature_key vf_latents probes
-
-  pi_latents
-    actor feature after shared_t passes through actor LayerNorm/Linear/ReLU
-    shape: 1024
