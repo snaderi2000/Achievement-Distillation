@@ -26,11 +26,11 @@ def active_memory_tasks(progress: th.Tensor) -> List[str]:
     return [task for task, value in zip(TASKS, values) if value > 0.5]
 
 
-def remove_task(progress: th.Tensor, task: str) -> th.Tensor:
+def set_task(progress: th.Tensor, task: str, value: float) -> th.Tensor:
     if task not in TASKS:
         raise ValueError(f"Unknown task '{task}'. Valid tasks: {TASKS}")
     edited = progress.clone()
-    edited[:, TASKS.index(task)] = 0.0
+    edited[:, TASKS.index(task)] = float(value)
     return edited
 
 
@@ -195,7 +195,18 @@ def main():
     parser.add_argument("--episode_id", type=int, default=0)
     parser.add_argument("--step_id", type=int, required=True)
     parser.add_argument("--skeleton_delta", type=str, default="0,1")
-    parser.add_argument("--remove_memory_task", type=str, default="defeat_skeleton")
+    parser.add_argument(
+        "--memory_task",
+        type=str,
+        default="defeat_skeleton",
+        help="Achievement-memory bit to compare as absent vs present.",
+    )
+    parser.add_argument(
+        "--remove_memory_task",
+        type=str,
+        default=None,
+        help="Deprecated alias for --memory_task.",
+    )
     parser.add_argument("--target_material", type=str, default="grass")
     parser.add_argument(
         "--pixel_insert_skeleton",
@@ -249,23 +260,25 @@ def main():
         dataset_idx = None
         base_obs = replay_obs.copy()
 
-    edited_memory = remove_task(actual_memory, args.remove_memory_task)
+    memory_task = args.remove_memory_task or args.memory_task
+    memory_without_task = set_task(actual_memory, memory_task, 0.0)
+    memory_with_task = set_task(actual_memory, memory_task, 1.0)
 
-    base_value_actual_memory = score_observation(
+    base_value_without_memory = score_observation(
         model,
         base_obs,
         device,
         replay_states,
         replay_rnn_states,
-        actual_memory,
+        memory_without_task,
     )["value"]
-    base_value_removed_memory = score_observation(
+    base_value_with_memory = score_observation(
         model,
         base_obs,
         device,
         replay_states,
         replay_rnn_states,
-        edited_memory,
+        memory_with_task,
     )["value"]
 
     dx, dy = parse_vec2(args.skeleton_delta)
@@ -278,47 +291,51 @@ def main():
         apply_spawn_object(replay_env, [(dx, dy, "skeleton")], edits_log)
         skeleton_obs = render_env(replay_env)
 
-    skeleton_value_actual_memory = score_observation(
+    skeleton_value_without_memory = score_observation(
         model,
         skeleton_obs,
         device,
         replay_states,
         replay_rnn_states,
-        actual_memory,
+        memory_without_task,
     )["value"]
-    skeleton_value_removed_memory = score_observation(
+    skeleton_value_with_memory = score_observation(
         model,
         skeleton_obs,
         device,
         replay_states,
         replay_rnn_states,
-        edited_memory,
+        memory_with_task,
     )["value"]
 
     rows = [
         {
-            "condition": "replayed_obs_actual_memory",
-            "value": base_value_actual_memory,
+            "condition": f"replayed_obs_{memory_task}=0",
+            "value": base_value_without_memory,
             "has_skeleton_counterfactual": False,
-            "memory_task_removed": "",
+            "memory_task": memory_task,
+            "memory_task_value": 0,
         },
         {
-            "condition": f"replayed_obs_without_{args.remove_memory_task}_memory",
-            "value": base_value_removed_memory,
+            "condition": f"replayed_obs_{memory_task}=1",
+            "value": base_value_with_memory,
             "has_skeleton_counterfactual": False,
-            "memory_task_removed": args.remove_memory_task,
+            "memory_task": memory_task,
+            "memory_task_value": 1,
         },
         {
-            "condition": "skeleton_actual_memory",
-            "value": skeleton_value_actual_memory,
+            "condition": f"skeleton_{memory_task}=0",
+            "value": skeleton_value_without_memory,
             "has_skeleton_counterfactual": True,
-            "memory_task_removed": "",
+            "memory_task": memory_task,
+            "memory_task_value": 0,
         },
         {
-            "condition": f"skeleton_without_{args.remove_memory_task}_memory",
-            "value": skeleton_value_removed_memory,
+            "condition": f"skeleton_{memory_task}=1",
+            "value": skeleton_value_with_memory,
             "has_skeleton_counterfactual": True,
-            "memory_task_removed": args.remove_memory_task,
+            "memory_task": memory_task,
+            "memory_task_value": 1,
         },
     ]
 
@@ -331,7 +348,7 @@ def main():
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["condition", "value", "has_skeleton_counterfactual", "memory_task_removed"],
+            fieldnames=["condition", "value", "has_skeleton_counterfactual", "memory_task", "memory_task_value"],
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -349,12 +366,14 @@ def main():
         "skeleton_delta": [dx, dy],
         "edits": edits_log,
         "actual_memory_tasks": active_memory_tasks(actual_memory),
-        "edited_memory_tasks": active_memory_tasks(edited_memory),
-        "removed_memory_task": args.remove_memory_task,
+        "memory_without_task_tasks": active_memory_tasks(memory_without_task),
+        "memory_with_task_tasks": active_memory_tasks(memory_with_task),
+        "memory_task": memory_task,
         "values": rows,
-        "delta_skeleton_vs_replay_actual_memory": skeleton_value_actual_memory - base_value_actual_memory,
-        "delta_removed_memory_on_replayed_obs": base_value_removed_memory - base_value_actual_memory,
-        "delta_removed_memory_on_skeleton_obs": skeleton_value_removed_memory - skeleton_value_actual_memory,
+        "delta_skeleton_vs_replay_memory_task_0": skeleton_value_without_memory - base_value_without_memory,
+        "delta_skeleton_vs_replay_memory_task_1": skeleton_value_with_memory - base_value_with_memory,
+        "delta_memory_task_on_replayed_obs": base_value_with_memory - base_value_without_memory,
+        "delta_memory_task_on_skeleton_obs": skeleton_value_with_memory - skeleton_value_without_memory,
         "csv_path": csv_path,
         "figure_path": figure_path,
         "debug_replay_path": debug_replay_path if args.rollout_dataset_path else None,
