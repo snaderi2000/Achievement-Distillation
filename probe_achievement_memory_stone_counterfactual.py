@@ -81,15 +81,23 @@ def prepare_scene(
     return render_env(env)
 
 
+def set_player_health(env, value: int):
+    value = int(value)
+    if "health" not in env._player.inventory:
+        raise ValueError("Player inventory does not contain 'health'.")
+    env._player.inventory["health"] = value
+    env._player.health = value
+
+
 def save_figure(
     baseline_obs: np.ndarray,
     target_obs: np.ndarray,
     baseline_value: float,
     target_value: float,
-    target_material: str,
+    target_label: str,
     memory_tasks: Tuple[str, ...],
     inventory_updates: Dict[str, int],
-    target_delta: Tuple[int, int],
+    target_delta: Tuple[int, int] | None,
     output_path: str,
 ):
     delta = target_value - baseline_value
@@ -102,14 +110,14 @@ def save_figure(
 
     panels = [
         (baseline_obs, f"Baseline: all grass\nV={baseline_value:.3f}"),
-        (target_obs, f"Counterfactual: {target_material} in front\nV={target_value:.3f}  d={delta:+.3f}"),
+        (target_obs, f"Counterfactual: {target_label}\nV={target_value:.3f}  d={delta:+.3f}"),
     ]
     for ax, (obs, title) in zip(axes[:2], panels):
         ax.imshow(obs)
         ax.set_title(title, fontsize=11)
         ax.axis("off")
 
-    axes[2].bar(["all grass", target_material], [baseline_value, target_value], color=["#7fbf7b", "#9a9a9a"])
+    axes[2].bar(["baseline", target_label], [baseline_value, target_value], color=["#7fbf7b", "#9a9a9a"])
     axes[2].axhline(baseline_value, color="black", linewidth=1, alpha=0.45)
     axes[2].set_title("Predicted value", fontsize=11)
     axes[2].set_ylabel("V")
@@ -119,14 +127,13 @@ def save_figure(
         "memory: " + (", ".join(memory_tasks) if memory_tasks else "empty")
         + "\ninv: "
         + ", ".join(shown_inventory)
-        + "\ntarget delta: "
-        + str(tuple(target_delta)),
+        + ("\ntarget delta: " + str(tuple(target_delta)) if target_delta is not None else ""),
         transform=axes[2].transAxes,
         fontsize=9,
         va="bottom",
     )
 
-    fig.suptitle(f"Achievement-memory {target_material} counterfactual", fontsize=13)
+    fig.suptitle(f"Achievement-memory {target_label} counterfactual", fontsize=13)
     fig.tight_layout()
     fig.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -135,10 +142,10 @@ def save_figure(
 def save_observation_figure(
     baseline_obs: np.ndarray,
     target_obs: np.ndarray,
-    target_material: str,
+    target_label: str,
     memory_tasks: Tuple[str, ...],
     inventory_updates: Dict[str, int],
-    target_delta: Tuple[int, int],
+    target_delta: Tuple[int, int] | None,
     output_path: str,
 ):
     shown_inventory = [
@@ -149,7 +156,11 @@ def save_observation_figure(
     fig, axes = plt.subplots(1, 3, figsize=(12.2, 4.0))
     panels = [
         (baseline_obs, "Baseline observation\nall grass"),
-        (target_obs, f"Counterfactual observation\n{target_material} at delta {tuple(target_delta)}"),
+        (
+            target_obs,
+            "Counterfactual observation\n"
+            + (f"{target_label} at delta {tuple(target_delta)}" if target_delta is not None else target_label),
+        ),
     ]
     for ax, (obs, title) in zip(axes[:2], panels):
         ax.imshow(obs)
@@ -165,21 +176,20 @@ def save_observation_figure(
         + ("  " + "\n  ".join(memory_tasks) if memory_tasks else "  empty")
         + "\n\ninventory:\n  "
         + (", ".join(shown_inventory) if shown_inventory else "empty")
-        + "\n\ntarget_delta:\n  "
-        + str(tuple(target_delta)),
+        + ("\n\ntarget_delta:\n  " + str(tuple(target_delta)) if target_delta is not None else ""),
         transform=axes[2].transAxes,
         fontsize=10,
         va="top",
         family="monospace",
     )
 
-    fig.suptitle(f"Fixed observations for {target_material} value sweep", fontsize=13)
+    fig.suptitle(f"Fixed observations for {target_label} value sweep", fontsize=13)
     fig.tight_layout()
     fig.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
 
 
-def save_sweep_figure(rows, target_material: str, output_path: str):
+def save_sweep_figure(rows, target_label: str, output_path: str):
     epochs = [row["ckpt_epoch"] for row in rows]
     deltas = [row["delta_value"] for row in rows]
     baseline_values = [row["baseline_value"] for row in rows]
@@ -190,18 +200,18 @@ def save_sweep_figure(rows, target_material: str, output_path: str):
     axes[0].plot(epochs, deltas, marker="o", color="#444444")
     axes[0].fill_between(epochs, 0.0, deltas, where=np.array(deltas) >= 0.0, color="#d95f02", alpha=0.18)
     axes[0].fill_between(epochs, 0.0, deltas, where=np.array(deltas) < 0.0, color="#1b9e77", alpha=0.18)
-    axes[0].set_title(f"{target_material} preference")
+    axes[0].set_title(f"{target_label} preference")
     axes[0].set_xlabel("checkpoint epoch")
-    axes[0].set_ylabel(f"V({target_material}) - V(grass)")
+    axes[0].set_ylabel(f"V({target_label}) - V(baseline)")
 
-    axes[1].plot(epochs, baseline_values, marker="o", label="grass", color="#7fbf7b")
-    axes[1].plot(epochs, target_values, marker="o", label=target_material, color="#777777")
+    axes[1].plot(epochs, baseline_values, marker="o", label="baseline", color="#7fbf7b")
+    axes[1].plot(epochs, target_values, marker="o", label=target_label, color="#777777")
     axes[1].set_title("Predicted values")
     axes[1].set_xlabel("checkpoint epoch")
     axes[1].set_ylabel("V")
     axes[1].legend(frameon=False)
 
-    fig.suptitle(f"Achievement-memory {target_material} preference across checkpoints")
+    fig.suptitle(f"Achievement-memory {target_label} preference across checkpoints")
     fig.tight_layout()
     fig.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -270,6 +280,12 @@ def main():
     parser.add_argument("--target_delta", type=str, default="0,1")
     parser.add_argument("--target_material", type=str, default="stone")
     parser.add_argument(
+        "--target_health",
+        type=int,
+        default=None,
+        help="If set, make the counterfactual all grass with this health value instead of changing material.",
+    )
+    parser.add_argument(
         "--memory_tasks",
         type=str,
         default=",".join(DEFAULT_MEMORY_TASKS),
@@ -312,13 +328,30 @@ def main():
         keep_vitals_full,
         inventory_overrides,
     )
-    target_obs = prepare_scene(
-        target_env,
-        target_delta,
-        args.target_material,
-        keep_vitals_full,
-        inventory_overrides,
-    )
+    if args.target_health is None:
+        target_obs = prepare_scene(
+            target_env,
+            target_delta,
+            args.target_material,
+            keep_vitals_full,
+            inventory_overrides,
+        )
+        target_label = args.target_material
+        target_delta_for_output = target_delta
+        stem_target = args.target_material
+    else:
+        prepare_scene(
+            target_env,
+            target_delta,
+            "grass",
+            keep_vitals_full,
+            inventory_overrides,
+        )
+        set_player_health(target_env, args.target_health)
+        target_obs = render_env(target_env)
+        target_label = f"health={args.target_health}"
+        target_delta_for_output = None
+        stem_target = f"health{args.target_health}"
     inventory_updates = dict(target_env._player.inventory)
 
     epochs = parse_epochs(args.ckpt_epochs) if args.ckpt_epochs else (args.ckpt_epoch,)
@@ -337,19 +370,19 @@ def main():
     ]
 
     if args.ckpt_epochs:
-        stem = f"{args.exp_name}-s{args.train_seed:02}-{args.target_material}-sweep"
+        stem = f"{args.exp_name}-s{args.train_seed:02}-{stem_target}-sweep"
         figure_path = os.path.join(args.output_dir, f"{stem}.png")
         observation_figure_path = os.path.join(args.output_dir, f"{stem}-observations.png")
         csv_path = os.path.join(args.output_dir, f"{stem}.csv")
         summary_path = os.path.join(args.output_dir, f"{stem}.json")
-        save_sweep_figure(rows, args.target_material, figure_path)
+        save_sweep_figure(rows, target_label, figure_path)
         save_observation_figure(
             baseline_obs,
             target_obs,
-            args.target_material,
+            target_label,
             memory_tasks,
             inventory_updates,
-            target_delta,
+            target_delta_for_output,
             observation_figure_path,
         )
         with open(csv_path, "w", newline="") as f:
@@ -361,8 +394,10 @@ def main():
             writer.writerows(rows)
         summary = {
             "eval_seed": args.eval_seed,
-            "target_delta": list(target_delta),
+            "target_delta": None if target_delta_for_output is None else list(target_delta_for_output),
             "target_material": args.target_material,
+            "target_health": args.target_health,
+            "target_label": target_label,
             "memory_tasks": list(memory_tasks),
             "inventory_overrides": inventory_overrides,
             "inventory": inventory_updates,
@@ -380,7 +415,7 @@ def main():
         return
 
     row = rows[0]
-    stem = f"{args.exp_name}-s{args.train_seed:02}-e{args.ckpt_epoch:03}-{args.target_material}"
+    stem = f"{args.exp_name}-s{args.train_seed:02}-e{args.ckpt_epoch:03}-{stem_target}"
     figure_path = os.path.join(args.output_dir, f"{stem}.png")
     summary_path = os.path.join(args.output_dir, f"{stem}.json")
     save_figure(
@@ -388,17 +423,19 @@ def main():
         target_obs,
         row["baseline_value"],
         row["target_value"],
-        args.target_material,
+        target_label,
         memory_tasks,
         inventory_updates,
-        target_delta,
+        target_delta_for_output,
         figure_path,
     )
 
     summary = {
         "eval_seed": args.eval_seed,
-        "target_delta": list(target_delta),
+        "target_delta": None if target_delta_for_output is None else list(target_delta_for_output),
         "target_material": args.target_material,
+        "target_health": args.target_health,
+        "target_label": target_label,
         "memory_tasks": list(memory_tasks),
         "inventory_overrides": inventory_overrides,
         "inventory": inventory_updates,
