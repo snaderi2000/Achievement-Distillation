@@ -66,11 +66,12 @@ def prepare_scene(
     env,
     target_delta: Tuple[int, int],
     target_material: str,
+    background_material: str,
     keep_vitals_full: bool,
     inventory_overrides: Dict[str, int] | None,
 ):
     clear_visible_objects(env)
-    make_visible_material(env, "grass", keep_player_tile=True)
+    make_visible_material(env, background_material, keep_player_tile=True)
     prepare_inventory(
         env,
         keep_vitals_full=keep_vitals_full,
@@ -109,7 +110,7 @@ def save_figure(
     fig, axes = plt.subplots(1, 3, figsize=(12.4, 4.2))
 
     panels = [
-        (baseline_obs, f"Baseline: all grass\nV={baseline_value:.3f}"),
+        (baseline_obs, f"Baseline\nV={baseline_value:.3f}"),
         (target_obs, f"Counterfactual: {target_label}\nV={target_value:.3f}  d={delta:+.3f}"),
     ]
     for ax, (obs, title) in zip(axes[:2], panels):
@@ -155,7 +156,7 @@ def save_observation_figure(
     ]
     fig, axes = plt.subplots(1, 3, figsize=(12.2, 4.0))
     panels = [
-        (baseline_obs, "Baseline observation\nall grass"),
+        (baseline_obs, "Baseline observation"),
         (
             target_obs,
             "Counterfactual observation\n"
@@ -280,6 +281,12 @@ def main():
     parser.add_argument("--target_delta", type=str, default="0,1")
     parser.add_argument("--target_material", type=str, default="stone")
     parser.add_argument(
+        "--background_material",
+        type=str,
+        default="grass",
+        help="Material used for every visible background tile before applying the target counterfactual.",
+    )
+    parser.add_argument(
         "--target_health",
         type=int,
         default=None,
@@ -324,7 +331,8 @@ def main():
     baseline_obs = prepare_scene(
         baseline_env,
         target_delta,
-        "grass",
+        args.background_material,
+        args.background_material,
         keep_vitals_full,
         inventory_overrides,
     )
@@ -333,6 +341,7 @@ def main():
             target_env,
             target_delta,
             args.target_material,
+            args.background_material,
             keep_vitals_full,
             inventory_overrides,
         )
@@ -343,7 +352,8 @@ def main():
         prepare_scene(
             target_env,
             target_delta,
-            "grass",
+            args.background_material,
+            args.background_material,
             keep_vitals_full,
             inventory_overrides,
         )
@@ -396,6 +406,7 @@ def main():
             "eval_seed": args.eval_seed,
             "target_delta": None if target_delta_for_output is None else list(target_delta_for_output),
             "target_material": args.target_material,
+            "background_material": args.background_material,
             "target_health": args.target_health,
             "target_label": target_label,
             "memory_tasks": list(memory_tasks),
@@ -434,6 +445,7 @@ def main():
         "eval_seed": args.eval_seed,
         "target_delta": None if target_delta_for_output is None else list(target_delta_for_output),
         "target_material": args.target_material,
+        "background_material": args.background_material,
         "target_health": args.target_health,
         "target_label": target_label,
         "memory_tasks": list(memory_tasks),
