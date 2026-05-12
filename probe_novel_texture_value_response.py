@@ -294,7 +294,7 @@ def main():
             achievement_progress,
         )["value"]
         dx, dy = choose_visible_delta(base_env, rng)
-        examples.append((f"state {state_idx} base\nV={base_value:.2f}", base_obs))
+        state_examples = [(f"state {state_idx} base\nV={base_value:.2f}", base_obs)]
         for texture in textures:
             env_copy = copy.deepcopy(base_env)
             if texture in synthetic_textures:
@@ -325,10 +325,10 @@ def main():
                     "memory_tasks": ";".join(active_memory_tasks(achievement_progress)),
                 }
             )
-            if len(examples) < 16:
-                examples.append((f"s{state_idx} {texture}@({dx},{dy})\nd={edited_value - base_value:+.2f}", edited_obs))
+            state_examples.append((f"s{state_idx} {texture}@({dx},{dy})\nd={edited_value - base_value:+.2f}", edited_obs))
             env_copy.close()
         base_env.close()
+        examples.extend(state_examples)
 
     csv_path = os.path.join(args.output_dir, "novel_texture_value_rows.csv")
     plot_path = os.path.join(args.output_dir, "novel_texture_value_summary.png")
