@@ -5,6 +5,7 @@ import os
 from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch as th
 
 from achievement_distillation.constant import TASKS
@@ -17,6 +18,7 @@ from counterfactual_env_editor import (
     replay_to_step,
     score_observation,
 )
+from probe_material_value_preference import clear_visible_objects, make_visible_material
 
 
 def active_memory_tasks(progress: th.Tensor) -> List[str]:
@@ -111,7 +113,7 @@ def save_figure(base_obs, skeleton_obs, rows: List[Dict[str, object]], output_pa
     ax1.set_title("counterfactual\nskeleton in front")
     ax1.axis("off")
 
-    bars = ax2.bar(labels, values, color=["#8da0cb", "#fc8d62", "#66c2a5"])
+    bars = ax2.bar(labels, values, color=["#8da0cb", "#b3b3e6", "#fc8d62", "#66c2a5"])
     ax2.set_ylabel("V(obs, memory)")
     ax2.set_title("Skeleton value under memory edits")
     for bar, value in zip(bars, values):
@@ -135,6 +137,49 @@ def save_debug_replay_figure(dataset_obs, replay_obs, output_path: str):
     plt.close(fig)
 
 
+def insert_skeleton_pixels(obs: np.ndarray, delta: Tuple[int, int], eval_seed: int) -> np.ndarray:
+    """Insert a skeleton sprite into the exact saved observation.
+
+    This avoids simulator-state replay. It renders a clean grass scene with and without
+    a skeleton, extracts only the changed sprite pixels, and pastes those pixels into
+    the saved HTML/dataset observation.
+    """
+    from crafter.env import Env
+
+    env = Env(seed=eval_seed)
+    env.reset()
+    clear_visible_objects(env)
+    make_visible_material(env, "grass", keep_player_tile=True)
+    clean_obs = render_env(env)
+    apply_spawn_object(env, [(delta[0], delta[1], "skeleton")], [])
+    skeleton_template_obs = render_env(env)
+
+    grid = tuple(int(x) for x in env._local_view._grid)
+    center_x = grid[0] // 2
+    center_y = grid[1] // 2
+    cell_x = center_x + int(delta[0])
+    cell_y = center_y + int(delta[1])
+    if not (0 <= cell_x < grid[0] and 0 <= cell_y < grid[1]):
+        env.close()
+        raise ValueError(f"Skeleton delta {delta} maps outside visible grid {grid}.")
+
+    cell_w = obs.shape[1] // grid[0]
+    # Crafter's 64x64 render has a 15-pixel HUD, leaving 49 world pixels = 7 rows * 7 px.
+    cell_h = (obs.shape[0] - 15) // grid[1]
+    x0 = cell_x * cell_w
+    y0 = cell_y * cell_h
+
+    clean_cell = clean_obs[y0 : y0 + cell_h, x0 : x0 + cell_w]
+    skeleton_cell = skeleton_template_obs[y0 : y0 + cell_h, x0 : x0 + cell_w]
+    sprite_mask = (skeleton_cell != clean_cell).any(axis=-1, keepdims=True)
+
+    edited = obs.copy()
+    original_cell = edited[y0 : y0 + cell_h, x0 : x0 + cell_w]
+    edited[y0 : y0 + cell_h, x0 : x0 + cell_w] = np.where(sprite_mask, skeleton_cell, original_cell)
+    env.close()
+    return edited
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -152,6 +197,11 @@ def main():
     parser.add_argument("--skeleton_delta", type=str, default="0,1")
     parser.add_argument("--remove_memory_task", type=str, default="defeat_skeleton")
     parser.add_argument("--target_material", type=str, default="grass")
+    parser.add_argument(
+        "--pixel_insert_skeleton",
+        action="store_true",
+        help="Insert skeleton directly into the saved observation pixels instead of editing replayed simulator state.",
+    )
     parser.add_argument(
         "--rollout_dataset_path",
         type=str,
@@ -220,9 +270,13 @@ def main():
 
     dx, dy = parse_vec2(args.skeleton_delta)
     edits_log: List[str] = []
-    apply_material_edits(replay_env, [(dx, dy, args.target_material)], edits_log)
-    apply_spawn_object(replay_env, [(dx, dy, "skeleton")], edits_log)
-    skeleton_obs = render_env(replay_env)
+    if args.pixel_insert_skeleton:
+        skeleton_obs = insert_skeleton_pixels(base_obs, (dx, dy), args.eval_seed)
+        edits_log.append(f"pixel_insert_skeleton@({dx},{dy})")
+    else:
+        apply_material_edits(replay_env, [(dx, dy, args.target_material)], edits_log)
+        apply_spawn_object(replay_env, [(dx, dy, "skeleton")], edits_log)
+        skeleton_obs = render_env(replay_env)
 
     skeleton_value_actual_memory = score_observation(
         model,
