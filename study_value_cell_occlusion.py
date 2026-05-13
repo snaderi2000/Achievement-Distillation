@@ -106,7 +106,37 @@ def occlusion_fill(obs: np.ndarray, mode: str, rng: np.random.Generator) -> np.n
         return np.clip(np.rint(world.reshape(-1, 3).mean(axis=0)), 0, 255).astype(np.uint8)
     if mode == "noise":
         return rng.integers(0, 256, size=3, dtype=np.uint8)
-    raise ValueError("--occlusion_mode must be one of: black, gray, world_mean, noise.")
+    raise ValueError(
+        "--occlusion_mode must be one of: black, gray, world_mean, noise, "
+        "novel_purple, novel_red, novel_cyan, novel_yellow, semantic_grass, semantic_path."
+    )
+
+
+def is_synthetic_occlusion(mode: str) -> bool:
+    return mode in {"novel_purple", "novel_red", "novel_cyan", "novel_yellow"}
+
+
+def synthetic_texture_patch(name: str, h: int, w: int, rng: np.random.Generator) -> np.ndarray:
+    palettes = {
+        "novel_purple": np.array([145, 55, 210], dtype=np.int16),
+        "novel_red": np.array([210, 35, 45], dtype=np.int16),
+        "novel_cyan": np.array([40, 195, 220], dtype=np.int16),
+        "novel_yellow": np.array([225, 210, 45], dtype=np.int16),
+    }
+    if name not in palettes:
+        raise ValueError(f"Unknown synthetic occlusion texture '{name}'.")
+    base = palettes[name]
+    yy, xx = np.mgrid[:h, :w]
+    checker = ((xx // 2 + yy // 2) % 2)[:, :, None]
+    noise = rng.integers(-18, 19, size=(h, w, 3), dtype=np.int16)
+    patch = base + noise + checker * 24
+    border = np.zeros((h, w, 1), dtype=bool)
+    border[0, :, 0] = True
+    border[-1, :, 0] = True
+    border[:, 0, 0] = True
+    border[:, -1, 0] = True
+    patch = np.where(border, np.maximum(patch - 55, 0), patch)
+    return np.clip(patch, 0, 255).astype(np.uint8)
 
 
 def occlude_cell(
@@ -119,10 +149,12 @@ def occlude_cell(
 ) -> np.ndarray:
     occluded = obs.copy()
     x0, x1, y0, y1 = cell_pixel_bounds(obs, grid_shape, ix, iy)
-    fill = occlusion_fill(obs, mode, rng)
-    if mode == "noise":
+    if is_synthetic_occlusion(mode):
+        occluded[y0:y1, x0:x1] = synthetic_texture_patch(mode, y1 - y0, x1 - x0, rng)
+    elif mode == "noise":
         occluded[y0:y1, x0:x1] = rng.integers(0, 256, size=(y1 - y0, x1 - x0, 3), dtype=np.uint8)
     else:
+        fill = occlusion_fill(obs, mode, rng)
         occluded[y0:y1, x0:x1] = fill
     return occluded
 
@@ -130,10 +162,12 @@ def occlude_cell(
 def occlude_inventory_slot(obs: np.ndarray, slot_idx: int, mode: str, rng: np.random.Generator) -> np.ndarray:
     occluded = obs.copy()
     x0, x1, y0, y1 = inventory_slot_bounds(obs, slot_idx)
-    fill = occlusion_fill(obs, mode, rng)
-    if mode == "noise":
+    if is_synthetic_occlusion(mode):
+        occluded[y0:y1, x0:x1] = synthetic_texture_patch(mode, y1 - y0, x1 - x0, rng)
+    elif mode == "noise":
         occluded[y0:y1, x0:x1] = rng.integers(0, 256, size=(y1 - y0, x1 - x0, 3), dtype=np.uint8)
     else:
+        fill = occlusion_fill(obs, mode, rng)
         occluded[y0:y1, x0:x1] = fill
     return occluded
 
@@ -486,10 +520,22 @@ def main():
     parser.add_argument("--print_every", type=int, default=10)
     parser.add_argument(
         "--occlusion_mode",
-        choices=["black", "gray", "world_mean", "noise", "semantic_grass", "semantic_path"],
+        choices=[
+            "black",
+            "gray",
+            "world_mean",
+            "noise",
+            "novel_purple",
+            "novel_red",
+            "novel_cyan",
+            "novel_yellow",
+            "semantic_grass",
+            "semantic_path",
+        ],
         default="world_mean",
         help=(
             "How to ablate a region. Pixel modes replace rendered cells. "
+            "novel_* modes use synthetic unseen texture patches. "
             "semantic_grass/path edits env state, re-renders world cells, and zeroes inventory items."
         ),
     )
