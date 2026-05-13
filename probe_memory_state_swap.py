@@ -107,6 +107,12 @@ def score(model, obs_hwc, memory: th.Tensor, device: th.device) -> float:
     return float(outputs["vpreds"].item())
 
 
+def swap_inventory_pixels(world_obs_hwc: np.ndarray, inventory_obs_hwc: np.ndarray, inventory_y: int) -> np.ndarray:
+    swapped = np.array(world_obs_hwc, copy=True)
+    swapped[inventory_y:, :, :] = inventory_obs_hwc[inventory_y:, :, :]
+    return swapped
+
+
 def write_csv(path: str, rows):
     if not rows:
         return
@@ -116,15 +122,17 @@ def write_csv(path: str, rows):
         writer.writerows(rows)
 
 
-def save_figure(path: str, state_a, state_b, rows):
+def save_figure(path: str, state_a, state_b, state_a_inv_b, state_b_inv_a, rows):
     labels = [row["condition"].replace("_", "\n") for row in rows]
     values = [float(row["value"]) for row in rows]
 
-    fig = plt.figure(figsize=(13.6, 4.5))
-    gs = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.0, 1.45])
+    fig = plt.figure(figsize=(15.5, 7.0))
+    gs = fig.add_gridspec(2, 4, width_ratios=[1.0, 1.0, 1.0, 1.0])
     ax0 = fig.add_subplot(gs[0, 0])
     ax1 = fig.add_subplot(gs[0, 1])
     ax2 = fig.add_subplot(gs[0, 2])
+    ax3 = fig.add_subplot(gs[0, 3])
+    ax4 = fig.add_subplot(gs[1, :])
 
     ax0.imshow(state_a["obs_hwc"])
     ax0.set_title(f"episode {state_a['episode_id']}, step {state_a['step_id']}\nmem bits={len(active_memory_tasks(state_a['memory']))}")
@@ -134,12 +142,21 @@ def save_figure(path: str, state_a, state_b, rows):
     ax1.set_title(f"episode {state_b['episode_id']}, step {state_b['step_id']}\nmem bits={len(active_memory_tasks(state_b['memory']))}")
     ax1.axis("off")
 
-    bars = ax2.bar(labels, values, color=["#4c78a8", "#9ecae9", "#f58518", "#ffbf79"])
-    ax2.set_title("Value under own/swapped memory")
-    ax2.set_ylabel("V(obs, memory)")
-    ax2.tick_params(axis="x", rotation=25)
+    ax2.imshow(state_a_inv_b["obs_hwc"])
+    ax2.set_title(f"step {state_a['step_id']} world\nstep {state_b['step_id']} inventory")
+    ax2.axis("off")
+
+    ax3.imshow(state_b_inv_a["obs_hwc"])
+    ax3.set_title(f"step {state_b['step_id']} world\nstep {state_a['step_id']} inventory")
+    ax3.axis("off")
+
+    colors = ["#4c78a8", "#9ecae9", "#72b7b2", "#b6d6d3", "#f58518", "#ffbf79", "#54a24b", "#a7d99b"]
+    bars = ax4.bar(labels, values, color=colors[: len(values)])
+    ax4.set_title("Value under world / inventory / memory swaps")
+    ax4.set_ylabel("V(obs, memory)")
+    ax4.tick_params(axis="x", rotation=24)
     for bar, value in zip(bars, values):
-        ax2.text(bar.get_x() + bar.get_width() / 2, value, f"{value:.3f}", ha="center", va="bottom", fontsize=9)
+        ax4.text(bar.get_x() + bar.get_width() / 2, value, f"{value:.3f}", ha="center", va="bottom", fontsize=8)
 
     fig.tight_layout()
     fig.savefig(path, dpi=220, bbox_inches="tight")
@@ -165,6 +182,12 @@ def main():
     parser.add_argument("--step_a", type=int, required=True)
     parser.add_argument("--step_b", type=int, required=True)
     parser.add_argument("--eval_seed", type=int, default=67)
+    parser.add_argument(
+        "--inventory_y",
+        type=int,
+        default=49,
+        help="Pixel row where the inventory/HUD starts. Crafter 64x64 observations use 49.",
+    )
     parser.add_argument("--output_dir", type=str, default="memory_state_swap")
     args = parser.parse_args()
 
@@ -190,34 +213,78 @@ def main():
         data_source = args.dataset_path
 
     uses_memory = getattr(model, "use_achievement_progress_input", False) or hasattr(model, "achievement_progress_dim")
+    state_a_inv_b = {
+        **state_a,
+        "obs_hwc": swap_inventory_pixels(state_a["obs_hwc"], state_b["obs_hwc"], args.inventory_y),
+    }
+    state_b_inv_a = {
+        **state_b,
+        "obs_hwc": swap_inventory_pixels(state_b["obs_hwc"], state_a["obs_hwc"], args.inventory_y),
+    }
     rows = [
         {
-            "condition": f"step_{args.step_a}_own_memory",
-            "obs_step": args.step_a,
+            "condition": f"step_{args.step_a}_own_inv_own_mem",
+            "world_step": args.step_a,
+            "inventory_step": args.step_a,
             "memory_step": args.step_a if uses_memory else None,
             "html_or_dataset_value": state_a["source_value"],
             "value": score(model, state_a["obs_hwc"], state_a["memory"], device),
         },
         {
-            "condition": f"step_{args.step_a}_memory_from_{args.step_b}",
-            "obs_step": args.step_a,
+            "condition": f"step_{args.step_a}_own_inv_mem_from_{args.step_b}",
+            "world_step": args.step_a,
+            "inventory_step": args.step_a,
             "memory_step": args.step_b if uses_memory else None,
             "html_or_dataset_value": None,
             "value": score(model, state_a["obs_hwc"], state_b["memory"], device),
         },
         {
-            "condition": f"step_{args.step_b}_own_memory",
-            "obs_step": args.step_b,
+            "condition": f"step_{args.step_a}_inv_from_{args.step_b}_own_mem",
+            "world_step": args.step_a,
+            "inventory_step": args.step_b,
+            "memory_step": args.step_a if uses_memory else None,
+            "html_or_dataset_value": None,
+            "value": score(model, state_a_inv_b["obs_hwc"], state_a["memory"], device),
+        },
+        {
+            "condition": f"step_{args.step_a}_inv_and_mem_from_{args.step_b}",
+            "world_step": args.step_a,
+            "inventory_step": args.step_b,
+            "memory_step": args.step_b if uses_memory else None,
+            "html_or_dataset_value": None,
+            "value": score(model, state_a_inv_b["obs_hwc"], state_b["memory"], device),
+        },
+        {
+            "condition": f"step_{args.step_b}_own_inv_own_mem",
+            "world_step": args.step_b,
+            "inventory_step": args.step_b,
             "memory_step": args.step_b if uses_memory else None,
             "html_or_dataset_value": state_b["source_value"],
             "value": score(model, state_b["obs_hwc"], state_b["memory"], device),
         },
         {
-            "condition": f"step_{args.step_b}_memory_from_{args.step_a}",
-            "obs_step": args.step_b,
+            "condition": f"step_{args.step_b}_own_inv_mem_from_{args.step_a}",
+            "world_step": args.step_b,
+            "inventory_step": args.step_b,
             "memory_step": args.step_a if uses_memory else None,
             "html_or_dataset_value": None,
             "value": score(model, state_b["obs_hwc"], state_a["memory"], device),
+        },
+        {
+            "condition": f"step_{args.step_b}_inv_from_{args.step_a}_own_mem",
+            "world_step": args.step_b,
+            "inventory_step": args.step_a,
+            "memory_step": args.step_b if uses_memory else None,
+            "html_or_dataset_value": None,
+            "value": score(model, state_b_inv_a["obs_hwc"], state_b["memory"], device),
+        },
+        {
+            "condition": f"step_{args.step_b}_inv_and_mem_from_{args.step_a}",
+            "world_step": args.step_b,
+            "inventory_step": args.step_a,
+            "memory_step": args.step_a if uses_memory else None,
+            "html_or_dataset_value": None,
+            "value": score(model, state_b_inv_a["obs_hwc"], state_a["memory"], device),
         },
     ]
 
@@ -226,7 +293,7 @@ def main():
     fig_path = os.path.join(args.output_dir, f"{stem}.png")
     json_path = os.path.join(args.output_dir, f"{stem}.json")
     write_csv(csv_path, rows)
-    save_figure(fig_path, state_a, state_b, rows)
+    save_figure(fig_path, state_a, state_b, state_a_inv_b, state_b_inv_a, rows)
 
     summary = {
         "checkpoint": ckpt_path,
@@ -239,6 +306,7 @@ def main():
         "uses_memory": uses_memory,
         "step_a_dataset_idx": state_a["idx"],
         "step_b_dataset_idx": state_b["idx"],
+        "inventory_y": args.inventory_y,
         "step_a_memory_tasks": active_memory_tasks(state_a["memory"]),
         "step_b_memory_tasks": active_memory_tasks(state_b["memory"]),
         "rows": rows,
