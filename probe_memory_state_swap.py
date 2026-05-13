@@ -1,10 +1,13 @@
 import argparse
+import base64
 import csv
 import json
 import os
+import re
 from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch as th
 
 from achievement_distillation.constant import TASKS
@@ -36,11 +39,63 @@ def load_step(dataset: Dict[str, th.Tensor], episode_id: int, step_id: int, devi
         memory = th.zeros(1, len(TASKS), device=device)
     return {
         "idx": idx,
+        "source_value": None,
         "episode_id": int(episode_ids[idx].item()),
         "step_id": int(step_ids[idx].item()),
         "obs_hwc": obs_hwc,
         "memory": memory,
     }
+
+
+def load_html_payload(html_path: str) -> Dict:
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    match = re.search(r"const DATA = (\{.*?\});\n\n\s+const canvas", html, flags=re.DOTALL)
+    if match is None:
+        raise ValueError(f"Could not find embedded DATA payload in {html_path}.")
+    return json.loads(match.group(1))
+
+
+def html_node_to_state(node: Dict, device: th.device):
+    raw = base64.b64decode(node["image_bytes"])
+    height = int(node["image_height"])
+    width = int(node["image_width"])
+    rgba = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 4)
+    obs_hwc = np.ascontiguousarray(rgba[..., :3])
+    progress = node.get("achievement_progress_input")
+    if progress is not None:
+        memory = th.tensor(progress, dtype=th.float32, device=device).view(1, -1)
+    else:
+        memory = th.zeros(1, len(TASKS), device=device)
+    return {
+        "idx": int(node["dataset_index"]),
+        "source_value": None if node.get("value") is None else float(node["value"]),
+        "episode_id": int(node["episode_id"]),
+        "step_id": int(node["step_id"]),
+        "obs_hwc": obs_hwc,
+        "memory": memory,
+    }
+
+
+def load_step_from_html(html_path: str, episode_id: int, step_id: int, device: th.device):
+    payload = load_html_payload(html_path)
+    nodes = payload.get("nodes", [])
+    matches = [
+        node
+        for node in nodes
+        if int(node.get("episode_id", -1)) == episode_id and int(node.get("step_id", -1)) == step_id
+    ]
+    if not matches:
+        available = sorted(
+            (int(node.get("episode_id", -1)), int(node.get("step_id", -1)))
+            for node in nodes
+        )
+        preview = ", ".join(f"ep{ep}:step{step}" for ep, step in available[:12])
+        raise ValueError(
+            f"HTML has no episode={episode_id}, step={step_id}. "
+            f"First available nodes: {preview}"
+        )
+    return html_node_to_state(matches[0], device)
 
 
 def score(model, obs_hwc, memory: th.Tensor, device: th.device) -> float:
@@ -99,7 +154,13 @@ def main():
     parser.add_argument("--timestamp", type=str, default="debug")
     parser.add_argument("--train_seed", type=int, required=True)
     parser.add_argument("--ckpt_epoch", type=int, required=True)
-    parser.add_argument("--dataset_path", type=str, required=True)
+    parser.add_argument("--dataset_path", type=str, default=None)
+    parser.add_argument(
+        "--html_path",
+        type=str,
+        default=None,
+        help="Optional value-graph HTML to read exact displayed observations and memory from.",
+    )
     parser.add_argument("--episode_id", type=int, default=0)
     parser.add_argument("--step_a", type=int, required=True)
     parser.add_argument("--step_b", type=int, required=True)
@@ -112,11 +173,21 @@ def main():
     device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
     model, _config, ckpt_path = load_model(args.exp_name, args.timestamp, args.train_seed, args.ckpt_epoch, device)
 
-    if not os.path.exists(args.dataset_path):
-        raise FileNotFoundError(f"Dataset not found: {args.dataset_path}")
-    dataset = th.load(args.dataset_path, map_location="cpu")
-    state_a = load_step(dataset, args.episode_id, args.step_a, device)
-    state_b = load_step(dataset, args.episode_id, args.step_b, device)
+    if args.html_path is not None:
+        if not os.path.exists(args.html_path):
+            raise FileNotFoundError(f"HTML not found: {args.html_path}")
+        state_a = load_step_from_html(args.html_path, args.episode_id, args.step_a, device)
+        state_b = load_step_from_html(args.html_path, args.episode_id, args.step_b, device)
+        data_source = args.html_path
+    else:
+        if args.dataset_path is None:
+            raise ValueError("Pass either --html_path or --dataset_path.")
+        if not os.path.exists(args.dataset_path):
+            raise FileNotFoundError(f"Dataset not found: {args.dataset_path}")
+        dataset = th.load(args.dataset_path, map_location="cpu")
+        state_a = load_step(dataset, args.episode_id, args.step_a, device)
+        state_b = load_step(dataset, args.episode_id, args.step_b, device)
+        data_source = args.dataset_path
 
     uses_memory = getattr(model, "use_achievement_progress_input", False) or hasattr(model, "achievement_progress_dim")
     rows = [
@@ -124,24 +195,28 @@ def main():
             "condition": f"step_{args.step_a}_own_memory",
             "obs_step": args.step_a,
             "memory_step": args.step_a if uses_memory else None,
+            "html_or_dataset_value": state_a["source_value"],
             "value": score(model, state_a["obs_hwc"], state_a["memory"], device),
         },
         {
             "condition": f"step_{args.step_a}_memory_from_{args.step_b}",
             "obs_step": args.step_a,
             "memory_step": args.step_b if uses_memory else None,
+            "html_or_dataset_value": None,
             "value": score(model, state_a["obs_hwc"], state_b["memory"], device),
         },
         {
             "condition": f"step_{args.step_b}_own_memory",
             "obs_step": args.step_b,
             "memory_step": args.step_b if uses_memory else None,
+            "html_or_dataset_value": state_b["source_value"],
             "value": score(model, state_b["obs_hwc"], state_b["memory"], device),
         },
         {
             "condition": f"step_{args.step_b}_memory_from_{args.step_a}",
             "obs_step": args.step_b,
             "memory_step": args.step_a if uses_memory else None,
+            "html_or_dataset_value": None,
             "value": score(model, state_b["obs_hwc"], state_a["memory"], device),
         },
     ]
@@ -156,6 +231,8 @@ def main():
     summary = {
         "checkpoint": ckpt_path,
         "dataset_path": args.dataset_path,
+        "html_path": args.html_path,
+        "data_source": data_source,
         "episode_id": args.episode_id,
         "step_a": args.step_a,
         "step_b": args.step_b,
