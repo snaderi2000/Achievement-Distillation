@@ -11,6 +11,7 @@ import numpy as np
 import torch as th
 
 from collect_value_map import load_model, set_seed
+from achievement_distillation.constant import TASKS
 from counterfactual_env_editor import (
     crafter_inventory_rows,
     get_hidsize,
@@ -28,6 +29,7 @@ class CandidateState:
     env: object
     states: th.Tensor
     rnn_states: Optional[th.Tensor]
+    achievement_progress: Optional[th.Tensor]
     base_value: float
 
 
@@ -261,7 +263,14 @@ def collect_candidate_states(args, model, config, device) -> List[CandidateState
             args.step_id,
             device,
         )
-        scores = score_observation(model, replay.obs, device, replay.states, replay.rnn_states)
+        scores = score_observation(
+            model,
+            replay.obs,
+            device,
+            replay.states,
+            replay.rnn_states,
+            replay.achievement_progress,
+        )
         return [
             CandidateState(
                 episode_id=args.episode_id,
@@ -270,6 +279,7 @@ def collect_candidate_states(args, model, config, device) -> List[CandidateState
                 env=replay.env,
                 states=replay.states.clone(),
                 rnn_states=None if replay.rnn_states is None else replay.rnn_states.clone(),
+                achievement_progress=replay.achievement_progress.clone(),
                 base_value=scores["value"],
             )
         ]
@@ -285,6 +295,7 @@ def collect_candidate_states(args, model, config, device) -> List[CandidateState
         rnn_states = None
         if rnn_hidsize is not None:
             rnn_states = th.zeros(1, int(rnn_hidsize), device=device)
+        achievement_progress = th.zeros(1, len(TASKS), device=device)
 
         step_idx = 0
         while True:
@@ -294,7 +305,14 @@ def collect_candidate_states(args, model, config, device) -> List[CandidateState
                 and (args.max_step is None or step_idx <= args.max_step)
             )
             if should_sample:
-                scores = score_observation(model, obs, device, states.clone(), None if rnn_states is None else rnn_states.clone())
+                scores = score_observation(
+                    model,
+                    obs,
+                    device,
+                    states.clone(),
+                    None if rnn_states is None else rnn_states.clone(),
+                    achievement_progress.clone(),
+                )
                 candidates.append(
                     CandidateState(
                         episode_id=episode_idx,
@@ -303,6 +321,7 @@ def collect_candidate_states(args, model, config, device) -> List[CandidateState
                         env=copy.deepcopy(env),
                         states=states.clone(),
                         rnn_states=None if rnn_states is None else rnn_states.clone(),
+                        achievement_progress=achievement_progress.clone(),
                         base_value=scores["value"],
                     )
                 )
@@ -319,6 +338,8 @@ def collect_candidate_states(args, model, config, device) -> List[CandidateState
             act_kwargs = {"states": states}
             if rnn_states is not None:
                 act_kwargs["rnn_states"] = rnn_states
+            if getattr(model, "use_achievement_progress_input", False) or hasattr(model, "achievement_progress_dim"):
+                act_kwargs["achievement_progress"] = achievement_progress
             with th.no_grad():
                 outputs = model.act(obs_tensor, **act_kwargs)
                 action = int(outputs["actions"].item())
@@ -327,7 +348,13 @@ def collect_candidate_states(args, model, config, device) -> List[CandidateState
                 if "next_rnn_states" in outputs:
                     rnn_states = outputs["next_rnn_states"]
 
-            obs, _, done, _ = env.step(action)
+            obs, _, done, info = env.step(action)
+            achievements = info.get("achievements")
+            if achievements is not None:
+                achievement_progress = th.tensor(
+                    [[1.0 if achievements.get(task, 0) > 0 else 0.0 for task in TASKS]],
+                    device=device,
+                )
             step_idx += 1
             if done or (args.max_step is not None and step_idx > args.max_step):
                 break
@@ -368,6 +395,7 @@ def score_cell_occlusions(
                 device,
                 candidate.states,
                 candidate.rnn_states,
+                candidate.achievement_progress,
             )["value"]
             delta = value - candidate.base_value
             deltas[iy, ix] = delta
@@ -394,6 +422,7 @@ def score_cell_occlusions(
             device,
             candidate.states,
             candidate.rnn_states,
+            candidate.achievement_progress,
         )["value"]
         delta = value - candidate.base_value
         slot_row = slot_idx // inventory_cols
