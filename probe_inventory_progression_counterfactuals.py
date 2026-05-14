@@ -98,27 +98,34 @@ def scenario_specs() -> List[Dict]:
         },
         {
             "name": "wood_pickaxe_wood",
-            "title": "+ wood\n+ wood pickaxe",
+            "title": "+ table memory\n+ wood pickaxe",
             "inventory": {**vitals, "wood": 1, "wood_pickaxe": 1},
-            "memory_tasks": ["collect_wood", "make_wood_pickaxe"],
+            "memory_tasks": ["collect_wood", "place_table", "make_wood_pickaxe"],
         },
         {
             "name": "wood_pickaxe_wood_stone",
             "title": "+ stone",
             "inventory": {**vitals, "wood": 1, "wood_pickaxe": 1, "stone": 1},
-            "memory_tasks": ["collect_wood", "make_wood_pickaxe", "collect_stone"],
+            "memory_tasks": ["collect_wood", "place_table", "make_wood_pickaxe", "collect_stone"],
         },
         {
             "name": "stone_pickaxe_with_stone",
             "title": "+ stone pickaxe\nstone kept",
             "inventory": {**vitals, "wood": 1, "wood_pickaxe": 1, "stone": 1, "stone_pickaxe": 1},
-            "memory_tasks": ["collect_wood", "make_wood_pickaxe", "collect_stone", "make_stone_pickaxe"],
+            "memory_tasks": ["collect_wood", "place_table", "make_wood_pickaxe", "collect_stone", "make_stone_pickaxe"],
         },
         {
-            "name": "stone_pickaxe_stone_used",
-            "title": "+ stone pickaxe\nstone used",
-            "inventory": {**vitals, "wood": 1, "wood_pickaxe": 1, "stone": 0, "stone_pickaxe": 1},
-            "memory_tasks": ["collect_wood", "make_wood_pickaxe", "collect_stone", "make_stone_pickaxe"],
+            "name": "stone_sword_branch",
+            "title": "+ stone sword\nstone spent",
+            "inventory": {**vitals, "wood": 1, "wood_pickaxe": 1, "stone": 0, "stone_pickaxe": 1, "stone_sword": 1},
+            "memory_tasks": [
+                "collect_wood",
+                "place_table",
+                "make_wood_pickaxe",
+                "collect_stone",
+                "make_stone_pickaxe",
+                "make_stone_sword",
+            ],
         },
     ]
 
