@@ -3,6 +3,7 @@ import base64
 import csv
 import json
 import os
+import pickle
 import re
 from typing import Dict, List
 
@@ -160,6 +161,42 @@ def load_dataset_replay_step(dataset_path: str, eval_seed: int, episode_id: int,
     }
 
 
+def load_dataset_snapshot_step(dataset_path: str, episode_id: int, step_id: int, device: th.device) -> Dict:
+    dataset = th.load(normalize_path(dataset_path), map_location="cpu")
+    if "env_snapshots" not in dataset:
+        raise KeyError(
+            "Dataset does not contain env_snapshots. Regenerate it with collect_value_map.py --save_env_snapshots."
+        )
+    episode_ids = dataset["episode_ids"].cpu()
+    step_ids = dataset["step_ids"].cpu()
+    matches = th.nonzero((episode_ids == episode_id) & (step_ids == step_id), as_tuple=False).view(-1)
+    if matches.numel() == 0:
+        raise ValueError(f"Dataset has no episode={episode_id}, step={step_id}.")
+    idx = int(matches[0].item())
+    env = pickle.loads(dataset["env_snapshots"][idx])
+    obs = env.render()
+    progress = dataset.get("achievement_progress_inputs")
+    if progress is None:
+        memory = th.zeros(1, len(TASKS), device=device)
+    else:
+        memory = progress[idx].float().view(1, -1).to(device)
+    values = dataset.get("values")
+    source_value = None if values is None else float(values[idx].item())
+    saved_obs = observation_to_uint8_hwc(dataset["observations"][idx])
+    obs_l1 = float(np.mean(np.abs(saved_obs.astype(np.float32) - obs.astype(np.float32))))
+    return {
+        "dataset_index": idx,
+        "html_value": source_value,
+        "episode_id": int(episode_ids[idx].item()),
+        "step_id": int(step_ids[idx].item()),
+        "obs_hwc": obs.copy(),
+        "memory": memory,
+        "memory_tasks": active_memory_tasks(memory),
+        "env": env,
+        "dataset_snapshot_obs_l1": obs_l1,
+    }
+
+
 def inventory_items() -> List[str]:
     try:
         from crafter import constants as crafter_constants
@@ -309,7 +346,11 @@ def main():
     parser.add_argument("--timestamp", type=str, default="debug")
     parser.add_argument("--train_seed", type=int, required=True)
     parser.add_argument("--ckpt_epoch", type=int, required=True)
-    parser.add_argument("--source", choices=["html", "dataset", "dataset_replay", "replay"], default="html")
+    parser.add_argument(
+        "--source",
+        choices=["html", "dataset", "dataset_replay", "dataset_snapshot", "replay"],
+        default="html",
+    )
     parser.add_argument("--html_path", type=str, default=None)
     parser.add_argument("--dataset_path", type=str, default=None)
     parser.add_argument("--episode_id", type=int, default=0)
@@ -343,6 +384,10 @@ def main():
         if args.dataset_path is None:
             raise ValueError("--dataset_path is required when --source dataset_replay.")
         state = load_dataset_replay_step(args.dataset_path, args.eval_seed, args.episode_id, args.step_id, device)
+    elif args.source == "dataset_snapshot":
+        if args.dataset_path is None:
+            raise ValueError("--dataset_path is required when --source dataset_snapshot.")
+        state = load_dataset_snapshot_step(args.dataset_path, args.episode_id, args.step_id, device)
     else:
         state = load_replay_step(model, config, args.eval_seed, args.episode_id, args.step_id, device)
     inventory_items_to_remove = parse_csv_names(args.inventory_item)
@@ -416,6 +461,7 @@ def main():
         "step_id": args.step_id,
         "dataset_index": state["dataset_index"],
         "dataset_replay_obs_l1": state.get("dataset_replay_obs_l1"),
+        "dataset_snapshot_obs_l1": state.get("dataset_snapshot_obs_l1"),
         "inventory_items": inventory_items_to_remove,
         "set_inventory": parse_inventory_assignments(args.set_inventory),
         "inventory_edit_title": inventory_edit_title,

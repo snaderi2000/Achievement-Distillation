@@ -3,6 +3,7 @@ import base64
 import importlib
 import json
 import os
+import pickle
 import random
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -1239,6 +1240,7 @@ def collect_value_dataset(
     num_episodes: int,
     eval_seed: int,
     video_directory: Optional[str] = None,
+    save_env_snapshots: bool = False,
 ) -> Tuple[Dict[str, th.Tensor], Optional[str]]:
     from crafter.env import Env
     from crafter.recorder import VideoRecorder
@@ -1276,6 +1278,7 @@ def collect_value_dataset(
     achievements: List[th.Tensor] = []
     success_flags: List[th.Tensor] = []
     achievement_progress_inputs: List[th.Tensor] = []
+    env_snapshots: List[bytes] = []
     episode_ids: List[int] = []
     step_ids: List[int] = []
 
@@ -1320,6 +1323,8 @@ def collect_value_dataset(
             next_obs, reward, done_tensor, infos = venv.step(action)
 
             observations.append(obs.squeeze(0).detach().cpu())
+            if save_env_snapshots:
+                env_snapshots.append(pickle.dumps(venv.venv.envs[0]))
             latents.append(latent.squeeze(0).detach().cpu())
             values.append(value.squeeze(0).detach().cpu())
             actions.append(action.squeeze(0).detach().cpu())
@@ -1411,6 +1416,8 @@ def collect_value_dataset(
         dataset["achievement_values"] = th.stack(achievement_values).view(-1)
     if vitals:
         dataset["vitals"] = th.stack(vitals)
+    if save_env_snapshots:
+        dataset["env_snapshots"] = env_snapshots
     return dataset, latest_video_path
 
 
@@ -1475,6 +1482,7 @@ def main():
     parser.add_argument("--value_graph_num_neighbors", type=int, default=4)
     parser.add_argument("--value_graph_value_threshold", type=float, default=None)
     parser.add_argument("--episode_video_dir", type=str, default=None)
+    parser.add_argument("--save_env_snapshots", action="store_true")
     args = parser.parse_args()
 
     device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
@@ -1497,6 +1505,7 @@ def main():
         num_episodes=args.num_episodes,
         eval_seed=args.eval_seed,
         video_directory=args.episode_video_dir,
+        save_env_snapshots=args.save_env_snapshots,
     )
 
     th.save(dataset, args.output_dataset_path)
