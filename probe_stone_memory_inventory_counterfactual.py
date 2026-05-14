@@ -109,6 +109,57 @@ def load_dataset_step(dataset_path: str, episode_id: int, step_id: int, device: 
     }
 
 
+def load_dataset_replay_step(dataset_path: str, eval_seed: int, episode_id: int, step_id: int, device: th.device) -> Dict:
+    from crafter.env import Env
+
+    dataset = th.load(normalize_path(dataset_path), map_location="cpu")
+    episode_ids = dataset["episode_ids"].cpu()
+    step_ids = dataset["step_ids"].cpu()
+    matches = th.nonzero((episode_ids == episode_id) & (step_ids == step_id), as_tuple=False).view(-1)
+    if matches.numel() == 0:
+        raise ValueError(f"Dataset has no episode={episode_id}, step={step_id}.")
+    idx = int(matches[0].item())
+
+    episode_matches = th.nonzero(episode_ids == episode_id, as_tuple=False).view(-1)
+    ordered = episode_matches[th.argsort(step_ids[episode_matches])]
+    action_by_step = {
+        int(step_ids[data_idx].item()): int(dataset["actions"][data_idx].item())
+        for data_idx in ordered
+    }
+
+    env = Env(seed=eval_seed + episode_id)
+    obs = env.reset()
+    for replay_step in range(step_id):
+        if replay_step not in action_by_step:
+            env.close()
+            raise ValueError(f"Dataset is missing action for episode={episode_id}, step={replay_step}.")
+        obs, _reward, done, _info = env.step(action_by_step[replay_step])
+        if done:
+            env.close()
+            raise ValueError(f"Episode ended before requested step {step_id}; ended after step {replay_step}.")
+
+    progress = dataset.get("achievement_progress_inputs")
+    if progress is None:
+        memory = th.zeros(1, len(TASKS), device=device)
+    else:
+        memory = progress[idx].float().view(1, -1).to(device)
+    values = dataset.get("values")
+    source_value = None if values is None else float(values[idx].item())
+    saved_obs = observation_to_uint8_hwc(dataset["observations"][idx])
+    obs_l1 = float(np.mean(np.abs(saved_obs.astype(np.float32) - obs.astype(np.float32))))
+    return {
+        "dataset_index": idx,
+        "html_value": source_value,
+        "episode_id": int(episode_id),
+        "step_id": int(step_id),
+        "obs_hwc": obs.copy(),
+        "memory": memory,
+        "memory_tasks": active_memory_tasks(memory),
+        "env": env,
+        "dataset_replay_obs_l1": obs_l1,
+    }
+
+
 def inventory_items() -> List[str]:
     try:
         from crafter import constants as crafter_constants
@@ -258,7 +309,7 @@ def main():
     parser.add_argument("--timestamp", type=str, default="debug")
     parser.add_argument("--train_seed", type=int, required=True)
     parser.add_argument("--ckpt_epoch", type=int, required=True)
-    parser.add_argument("--source", choices=["html", "dataset", "replay"], default="html")
+    parser.add_argument("--source", choices=["html", "dataset", "dataset_replay", "replay"], default="html")
     parser.add_argument("--html_path", type=str, default=None)
     parser.add_argument("--dataset_path", type=str, default=None)
     parser.add_argument("--episode_id", type=int, default=0)
@@ -288,11 +339,15 @@ def main():
         if args.dataset_path is None:
             raise ValueError("--dataset_path is required when --source dataset.")
         state = load_dataset_step(args.dataset_path, args.episode_id, args.step_id, device)
+    elif args.source == "dataset_replay":
+        if args.dataset_path is None:
+            raise ValueError("--dataset_path is required when --source dataset_replay.")
+        state = load_dataset_replay_step(args.dataset_path, args.eval_seed, args.episode_id, args.step_id, device)
     else:
         state = load_replay_step(model, config, args.eval_seed, args.episode_id, args.step_id, device)
     inventory_items_to_remove = parse_csv_names(args.inventory_item)
     memory_tasks_to_remove = parse_csv_names(args.memory_task)
-    if args.source == "html":
+    if args.source in {"html", "dataset"}:
         obs_no_inventory = remove_inventory_item_pixels(state["obs_hwc"], inventory_items_to_remove)
         inventory_edit_title = f"blanked: {', '.join(inventory_items_to_remove)}"
     else:
@@ -360,6 +415,7 @@ def main():
         "episode_id": args.episode_id,
         "step_id": args.step_id,
         "dataset_index": state["dataset_index"],
+        "dataset_replay_obs_l1": state.get("dataset_replay_obs_l1"),
         "inventory_items": inventory_items_to_remove,
         "set_inventory": parse_inventory_assignments(args.set_inventory),
         "inventory_edit_title": inventory_edit_title,
