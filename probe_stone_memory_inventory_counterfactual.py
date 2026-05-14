@@ -18,6 +18,7 @@ from counterfactual_env_editor import (
     parse_inventory_assignments,
     replay_to_step,
 )
+from collect_value_map import observation_to_uint8_hwc
 
 
 def normalize_path(path: str) -> str:
@@ -77,6 +78,34 @@ def load_replay_step(model, config: Dict, eval_seed: int, episode_id: int, step_
         "memory": replay.achievement_progress.clone(),
         "memory_tasks": active_memory_tasks(replay.achievement_progress),
         "env": replay.env,
+    }
+
+
+def load_dataset_step(dataset_path: str, episode_id: int, step_id: int, device: th.device) -> Dict:
+    dataset = th.load(normalize_path(dataset_path), map_location="cpu")
+    episode_ids = dataset["episode_ids"].cpu()
+    step_ids = dataset["step_ids"].cpu()
+    matches = th.nonzero((episode_ids == episode_id) & (step_ids == step_id), as_tuple=False).view(-1)
+    if matches.numel() == 0:
+        raise ValueError(f"Dataset has no episode={episode_id}, step={step_id}.")
+    idx = int(matches[0].item())
+    progress = dataset.get("achievement_progress_inputs")
+    if progress is None:
+        memory = th.zeros(1, len(TASKS), device=device)
+    else:
+        memory = progress[idx].float().view(1, -1).to(device)
+    values = dataset.get("values")
+    source_value = None
+    if values is not None:
+        source_value = float(values[idx].item())
+    return {
+        "dataset_index": idx,
+        "html_value": source_value,
+        "episode_id": int(episode_ids[idx].item()),
+        "step_id": int(step_ids[idx].item()),
+        "obs_hwc": observation_to_uint8_hwc(dataset["observations"][idx]),
+        "memory": memory,
+        "memory_tasks": active_memory_tasks(memory),
     }
 
 
@@ -229,8 +258,9 @@ def main():
     parser.add_argument("--timestamp", type=str, default="debug")
     parser.add_argument("--train_seed", type=int, required=True)
     parser.add_argument("--ckpt_epoch", type=int, required=True)
-    parser.add_argument("--source", choices=["html", "replay"], default="html")
+    parser.add_argument("--source", choices=["html", "dataset", "replay"], default="html")
     parser.add_argument("--html_path", type=str, default=None)
+    parser.add_argument("--dataset_path", type=str, default=None)
     parser.add_argument("--episode_id", type=int, default=0)
     parser.add_argument("--step_id", type=int, required=True)
     parser.add_argument("--inventory_item", type=str, default="stone", help="Comma-separated inventory item(s).")
@@ -254,6 +284,10 @@ def main():
         if args.html_path is None:
             raise ValueError("--html_path is required when --source html.")
         state = load_html_step(args.html_path, args.episode_id, args.step_id, device)
+    elif args.source == "dataset":
+        if args.dataset_path is None:
+            raise ValueError("--dataset_path is required when --source dataset.")
+        state = load_dataset_step(args.dataset_path, args.episode_id, args.step_id, device)
     else:
         state = load_replay_step(model, config, args.eval_seed, args.episode_id, args.step_id, device)
     inventory_items_to_remove = parse_csv_names(args.inventory_item)
@@ -322,6 +356,7 @@ def main():
         "checkpoint": ckpt_path,
         "source": args.source,
         "html_path": None if args.html_path is None else normalize_path(args.html_path),
+        "dataset_path": None if args.dataset_path is None else normalize_path(args.dataset_path),
         "episode_id": args.episode_id,
         "step_id": args.step_id,
         "dataset_index": state["dataset_index"],
