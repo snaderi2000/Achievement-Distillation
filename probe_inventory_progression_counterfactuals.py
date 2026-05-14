@@ -97,8 +97,14 @@ def scenario_specs() -> List[Dict]:
             "memory_tasks": ["collect_wood"],
         },
         {
+            "name": "place_table",
+            "title": "+ table memory",
+            "inventory": {**vitals, "wood": 1},
+            "memory_tasks": ["collect_wood", "place_table"],
+        },
+        {
             "name": "wood_pickaxe_wood",
-            "title": "+ table memory\n+ wood pickaxe",
+            "title": "+ wood pickaxe",
             "inventory": {**vitals, "wood": 1, "wood_pickaxe": 1},
             "memory_tasks": ["collect_wood", "place_table", "make_wood_pickaxe"],
         },
@@ -109,15 +115,21 @@ def scenario_specs() -> List[Dict]:
             "memory_tasks": ["collect_wood", "place_table", "make_wood_pickaxe", "collect_stone"],
         },
         {
-            "name": "stone_pickaxe_with_stone",
-            "title": "+ stone pickaxe\nstone kept",
+            "name": "stone_stockpile",
+            "title": "+ more stone",
+            "inventory": {**vitals, "wood": 1, "wood_pickaxe": 1, "stone": 2},
+            "memory_tasks": ["collect_wood", "place_table", "make_wood_pickaxe", "collect_stone"],
+        },
+        {
+            "name": "stone_pickaxe_stone_remains",
+            "title": "+ stone pickaxe\nstone remains",
             "inventory": {**vitals, "wood": 1, "wood_pickaxe": 1, "stone": 1, "stone_pickaxe": 1},
             "memory_tasks": ["collect_wood", "place_table", "make_wood_pickaxe", "collect_stone", "make_stone_pickaxe"],
         },
         {
-            "name": "stone_sword_branch",
-            "title": "+ stone sword\nstone spent",
-            "inventory": {**vitals, "wood": 1, "wood_pickaxe": 1, "stone": 0, "stone_pickaxe": 1, "stone_sword": 1},
+            "name": "stone_sword",
+            "title": "+ stone sword",
+            "inventory": {**vitals, "wood": 1, "wood_pickaxe": 1, "stone": 1, "stone_pickaxe": 1, "stone_sword": 1},
             "memory_tasks": [
                 "collect_wood",
                 "place_table",
