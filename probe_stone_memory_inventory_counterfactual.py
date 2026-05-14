@@ -107,18 +107,24 @@ def inventory_slot_bounds(obs: np.ndarray, item_name: str):
     return x0, x1, y0, y1
 
 
-def remove_inventory_item_pixels(obs: np.ndarray, item_name: str) -> np.ndarray:
+def parse_csv_names(text: str) -> List[str]:
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def remove_inventory_item_pixels(obs: np.ndarray, item_names: List[str]) -> np.ndarray:
     edited = np.array(obs, copy=True)
-    x0, x1, y0, y1 = inventory_slot_bounds(obs, item_name)
-    edited[y0:y1, x0:x1] = 0
+    for item_name in item_names:
+        x0, x1, y0, y1 = inventory_slot_bounds(obs, item_name)
+        edited[y0:y1, x0:x1] = 0
     return edited
 
 
-def remove_memory_task(memory: th.Tensor, task_name: str) -> th.Tensor:
-    if task_name not in TASKS:
-        raise ValueError(f"Unknown task '{task_name}'.")
+def remove_memory_tasks(memory: th.Tensor, task_names: List[str]) -> th.Tensor:
     edited = memory.clone()
-    edited[:, TASKS.index(task_name)] = 0.0
+    for task_name in task_names:
+        if task_name not in TASKS:
+            raise ValueError(f"Unknown task '{task_name}'.")
+        edited[:, TASKS.index(task_name)] = 0.0
     return edited
 
 
@@ -150,7 +156,14 @@ def write_csv(path: str, rows: List[Dict]):
         writer.writerows(rows)
 
 
-def save_figure(path: str, state: Dict, obs_no_inventory: np.ndarray, rows: List[Dict], item_name: str, task_name: str):
+def save_figure(
+    path: str,
+    state: Dict,
+    obs_no_inventory: np.ndarray,
+    rows: List[Dict],
+    item_names: List[str],
+    task_names: List[str],
+):
     labels = [row["condition"].replace("_", "\n") for row in rows]
     values = [float(row["value"]) for row in rows]
 
@@ -167,11 +180,11 @@ def save_figure(path: str, state: Dict, obs_no_inventory: np.ndarray, rows: List
     ax0.axis("off")
 
     ax1.imshow(obs_no_inventory)
-    ax1.set_title(f"same world\n{item_name} slot removed")
+    ax1.set_title(f"same world\nremoved: {', '.join(item_names)}")
     ax1.axis("off")
 
     bars = ax2.bar(labels, values, color=["#4c78a8", "#9ecae9", "#f58518", "#ffbf79"])
-    ax2.set_title(f"Remove {item_name} inventory / {task_name} memory")
+    ax2.set_title(f"Remove inventory / memory\n{', '.join(item_names)} / {', '.join(task_names)}")
     ax2.set_ylabel("V(obs, memory)")
     ax2.tick_params(axis="x", rotation=20)
     for bar, value in zip(bars, values):
@@ -191,8 +204,8 @@ def main():
     parser.add_argument("--html_path", type=str, required=True)
     parser.add_argument("--episode_id", type=int, default=0)
     parser.add_argument("--step_id", type=int, required=True)
-    parser.add_argument("--inventory_item", type=str, default="stone")
-    parser.add_argument("--memory_task", type=str, default="collect_stone")
+    parser.add_argument("--inventory_item", type=str, default="stone", help="Comma-separated inventory item(s).")
+    parser.add_argument("--memory_task", type=str, default="collect_stone", help="Comma-separated memory task(s).")
     parser.add_argument("--eval_seed", type=int, default=67)
     parser.add_argument("--output_dir", type=str, default="expirements/stone_memory_inventory_counterfactual")
     args = parser.parse_args()
@@ -203,8 +216,10 @@ def main():
     model, _config, ckpt_path = load_model(args.exp_name, args.timestamp, args.train_seed, args.ckpt_epoch, device)
 
     state = load_html_step(args.html_path, args.episode_id, args.step_id, device)
-    obs_no_inventory = remove_inventory_item_pixels(state["obs_hwc"], args.inventory_item)
-    memory_no_task = remove_memory_task(state["memory"], args.memory_task)
+    inventory_items_to_remove = parse_csv_names(args.inventory_item)
+    memory_tasks_to_remove = parse_csv_names(args.memory_task)
+    obs_no_inventory = remove_inventory_item_pixels(state["obs_hwc"], inventory_items_to_remove)
+    memory_no_task = remove_memory_tasks(state["memory"], memory_tasks_to_remove)
 
     rows = [
         {
@@ -237,12 +252,13 @@ def main():
         },
     ]
 
-    stem = f"{args.exp_name}-s{args.train_seed:02d}-ep{args.episode_id:03d}-step{args.step_id:04d}-{args.inventory_item}-inventory-memory"
+    item_stem = "-".join(inventory_items_to_remove)
+    stem = f"{args.exp_name}-s{args.train_seed:02d}-ep{args.episode_id:03d}-step{args.step_id:04d}-{item_stem}-inventory-memory"
     csv_path = os.path.join(args.output_dir, f"{stem}.csv")
     fig_path = os.path.join(args.output_dir, f"{stem}.png")
     json_path = os.path.join(args.output_dir, f"{stem}.json")
     write_csv(csv_path, rows)
-    save_figure(fig_path, state, obs_no_inventory, rows, args.inventory_item, args.memory_task)
+    save_figure(fig_path, state, obs_no_inventory, rows, inventory_items_to_remove, memory_tasks_to_remove)
 
     summary = {
         "checkpoint": ckpt_path,
@@ -250,8 +266,8 @@ def main():
         "episode_id": args.episode_id,
         "step_id": args.step_id,
         "dataset_index": state["dataset_index"],
-        "inventory_item": args.inventory_item,
-        "memory_task": args.memory_task,
+        "inventory_items": inventory_items_to_remove,
+        "memory_tasks_removed": memory_tasks_to_remove,
         "base_memory_tasks": active_memory_tasks(state["memory"]),
         "memory_tasks_after_removal": active_memory_tasks(memory_no_task),
         "rows": rows,
