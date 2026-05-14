@@ -12,7 +12,12 @@ import torch as th
 
 from achievement_distillation.constant import TASKS
 from collect_value_map import load_model, set_seed
-from counterfactual_env_editor import crafter_inventory_rows
+from counterfactual_env_editor import (
+    apply_inventory_edits,
+    crafter_inventory_rows,
+    parse_inventory_assignments,
+    replay_to_step,
+)
 
 
 def normalize_path(path: str) -> str:
@@ -58,6 +63,20 @@ def load_html_step(html_path: str, episode_id: int, step_id: int, device: th.dev
         "obs_hwc": np.ascontiguousarray(rgba[..., :3]),
         "memory": memory,
         "memory_tasks": node.get("memory_tasks"),
+    }
+
+
+def load_replay_step(model, config: Dict, eval_seed: int, episode_id: int, step_id: int, device: th.device) -> Dict:
+    replay = replay_to_step(model, config, eval_seed, episode_id, step_id, device)
+    return {
+        "dataset_index": None,
+        "html_value": None,
+        "episode_id": int(replay.episode_id),
+        "step_id": int(replay.step_id),
+        "obs_hwc": replay.obs.copy(),
+        "memory": replay.achievement_progress.clone(),
+        "memory_tasks": active_memory_tasks(replay.achievement_progress),
+        "env": replay.env,
     }
 
 
@@ -119,6 +138,14 @@ def remove_inventory_item_pixels(obs: np.ndarray, item_names: List[str]) -> np.n
     return edited
 
 
+def render_replay_inventory_edit(state: Dict, inventory_items_to_remove: List[str], set_inventory: str) -> np.ndarray:
+    updates = {item_name: 0 for item_name in inventory_items_to_remove}
+    updates.update(parse_inventory_assignments(set_inventory))
+    edits_log: List[str] = []
+    apply_inventory_edits(state["env"], updates, edits_log)
+    return state["env"].render()
+
+
 def remove_memory_tasks(memory: th.Tensor, task_names: List[str]) -> th.Tensor:
     edited = memory.clone()
     for task_name in task_names:
@@ -163,6 +190,7 @@ def save_figure(
     rows: List[Dict],
     item_names: List[str],
     task_names: List[str],
+    inventory_edit_title: str,
 ):
     labels = [row["condition"].replace("_", "\n") for row in rows]
     values = [float(row["value"]) for row in rows]
@@ -180,7 +208,7 @@ def save_figure(
     ax0.axis("off")
 
     ax1.imshow(obs_no_inventory)
-    ax1.set_title(f"same world\nremoved: {', '.join(item_names)}")
+    ax1.set_title(f"inventory edited\n{inventory_edit_title}")
     ax1.axis("off")
 
     bars = ax2.bar(labels, values, color=["#4c78a8", "#9ecae9", "#f58518", "#ffbf79"])
@@ -196,15 +224,22 @@ def save_figure(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="HTML-aligned stone inventory/memory counterfactual.")
+    parser = argparse.ArgumentParser(description="Inventory/memory counterfactual from HTML pixels or replayed env render.")
     parser.add_argument("--exp_name", type=str, required=True)
     parser.add_argument("--timestamp", type=str, default="debug")
     parser.add_argument("--train_seed", type=int, required=True)
     parser.add_argument("--ckpt_epoch", type=int, required=True)
-    parser.add_argument("--html_path", type=str, required=True)
+    parser.add_argument("--source", choices=["html", "replay"], default="html")
+    parser.add_argument("--html_path", type=str, default=None)
     parser.add_argument("--episode_id", type=int, default=0)
     parser.add_argument("--step_id", type=int, required=True)
     parser.add_argument("--inventory_item", type=str, default="stone", help="Comma-separated inventory item(s).")
+    parser.add_argument(
+        "--set_inventory",
+        type=str,
+        default="",
+        help="Replay mode only. Comma-separated item=value assignments applied after removed items are set to 0.",
+    )
     parser.add_argument("--memory_task", type=str, default="collect_stone", help="Comma-separated memory task(s).")
     parser.add_argument("--eval_seed", type=int, default=67)
     parser.add_argument("--output_dir", type=str, default="expirements/stone_memory_inventory_counterfactual")
@@ -213,12 +248,27 @@ def main():
     set_seed(args.eval_seed)
     os.makedirs(args.output_dir, exist_ok=True)
     device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
-    model, _config, ckpt_path = load_model(args.exp_name, args.timestamp, args.train_seed, args.ckpt_epoch, device)
+    model, config, ckpt_path = load_model(args.exp_name, args.timestamp, args.train_seed, args.ckpt_epoch, device)
 
-    state = load_html_step(args.html_path, args.episode_id, args.step_id, device)
+    if args.source == "html":
+        if args.html_path is None:
+            raise ValueError("--html_path is required when --source html.")
+        state = load_html_step(args.html_path, args.episode_id, args.step_id, device)
+    else:
+        state = load_replay_step(model, config, args.eval_seed, args.episode_id, args.step_id, device)
     inventory_items_to_remove = parse_csv_names(args.inventory_item)
     memory_tasks_to_remove = parse_csv_names(args.memory_task)
-    obs_no_inventory = remove_inventory_item_pixels(state["obs_hwc"], inventory_items_to_remove)
+    if args.source == "html":
+        obs_no_inventory = remove_inventory_item_pixels(state["obs_hwc"], inventory_items_to_remove)
+        inventory_edit_title = f"blanked: {', '.join(inventory_items_to_remove)}"
+    else:
+        obs_no_inventory = render_replay_inventory_edit(state, inventory_items_to_remove, args.set_inventory)
+        inventory_assignments = parse_inventory_assignments(args.set_inventory)
+        assignment_text = ", ".join(
+            [f"{item}=0" for item in inventory_items_to_remove]
+            + [f"{key}={value}" for key, value in inventory_assignments.items()]
+        )
+        inventory_edit_title = assignment_text if assignment_text else "none"
     memory_no_task = remove_memory_tasks(state["memory"], memory_tasks_to_remove)
 
     rows = [
@@ -258,15 +308,26 @@ def main():
     fig_path = os.path.join(args.output_dir, f"{stem}.png")
     json_path = os.path.join(args.output_dir, f"{stem}.json")
     write_csv(csv_path, rows)
-    save_figure(fig_path, state, obs_no_inventory, rows, inventory_items_to_remove, memory_tasks_to_remove)
+    save_figure(
+        fig_path,
+        state,
+        obs_no_inventory,
+        rows,
+        inventory_items_to_remove,
+        memory_tasks_to_remove,
+        inventory_edit_title,
+    )
 
     summary = {
         "checkpoint": ckpt_path,
-        "html_path": normalize_path(args.html_path),
+        "source": args.source,
+        "html_path": None if args.html_path is None else normalize_path(args.html_path),
         "episode_id": args.episode_id,
         "step_id": args.step_id,
         "dataset_index": state["dataset_index"],
         "inventory_items": inventory_items_to_remove,
+        "set_inventory": parse_inventory_assignments(args.set_inventory),
+        "inventory_edit_title": inventory_edit_title,
         "memory_tasks_removed": memory_tasks_to_remove,
         "base_memory_tasks": active_memory_tasks(state["memory"]),
         "memory_tasks_after_removal": active_memory_tasks(memory_no_task),
